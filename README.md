@@ -13,7 +13,6 @@ A modern, macOS-optimized YouTube video downloader with hardware acceleration su
 - **Smart Processing**: Downloads video and audio streams separately for optimal quality
 - **Real-time Progress**: Live encoding progress with FPS monitoring
 - **Efficient**: Multi-threaded downloads and processing for maximum performance
-- **Native App**: Runs as a true macOS application without showing "Python" in the menu bar
 
 ## Requirements
 
@@ -25,14 +24,14 @@ A modern, macOS-optimized YouTube video downloader with hardware acceleration su
 
 ### Option 1: Download Pre-built App
 
-Download the latest release from the [Releases](https://github.com/yourusername/wampytube/releases) page and drag WampyTube.app to your Applications folder.
+Download the latest release from the [Releases](https://github.com/Wamphyre/Wampytube/releases) page and drag WampyTube.app to your Applications folder.
 
 ### Option 2: Build from Source
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/wampytube.git
-cd wampytube
+git clone https://github.com/Wamphyre/Wampytube.git
+cd Wampytube
 ```
 
 2. Install Python dependencies:
@@ -40,7 +39,7 @@ cd wampytube
 pip3 install -r requirements.txt
 ```
 
-3. Build the native macOS app:
+3. Build the macOS app:
 ```bash
 chmod +x build_app.sh
 ./build_app.sh
@@ -48,7 +47,7 @@ chmod +x build_app.sh
 
 The script will:
 - Check all dependencies
-- Create a native C launcher (no Python in menu!)
+- Create a native launcher
 - Generate a proper macOS app bundle
 - Optionally create a DMG for distribution
 
@@ -101,9 +100,9 @@ WampyTube automatically detects your system's GPU and uses:
 
 ## Building the App
 
-The `build_app.sh` script creates a true native macOS application:
+The `build_app.sh` script creates a macOS application bundle:
 
-1. **Native C Launcher**: Eliminates "Python" from the menu bar
+1. **Native Launcher**: Custom executable for app integration
 2. **Smart Python Detection**: Finds Python in multiple locations
 3. **Automatic Icon Generation**: Converts PNG to macOS ICNS format
 4. **Code Signing**: Signs the app for Gatekeeper (if certificates available)
@@ -126,7 +125,7 @@ chmod +x build_app.sh
 
 # The script will:
 # 1. Check all dependencies
-# 2. Create native C launcher
+# 2. Create native launcher
 # 3. Generate app bundle
 # 4. Optionally create DMG
 # 5. Test the app
@@ -140,7 +139,7 @@ wampytube/
 ├── ffmpeg            # FFmpeg binary
 ├── icon.png          # Application icon
 ├── requirements.txt  # Python dependencies
-├── build_app.sh     # Native app build script
+├── build_app.sh     # App build script
 ├── README.md        # This file
 └── dist/            # Build output (created by build script)
     ├── WampyTube.app/   # macOS application
@@ -223,6 +222,6 @@ For issues, questions, or suggestions, please open an issue on GitHub.
 ### v1.0.0
 - Initial release
 - Hardware-accelerated video encoding
-- Native macOS app with C launcher
+- macOS app bundle with custom launcher
 - Automatic dark/light mode support
 - Multi-threaded downloading
