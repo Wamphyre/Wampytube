@@ -12,14 +12,18 @@ import concurrent.futures
 import time
 from functools import lru_cache
 import psutil
+import sys
 
 # Global cache configuration for HTTP responses
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"})
+SESSION.headers.update({"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"})
 
 # Logging configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("WampyTube")
+# Remove all existing handlers to avoid duplication
+logger.handlers = []
+logger.propagate = False
 
 # System resources configuration - Auto-detect cores/threads
 SYSTEM_CORES = psutil.cpu_count(logical=False) or 4
@@ -27,69 +31,80 @@ SYSTEM_THREADS = psutil.cpu_count(logical=True) or 8
 DOWNLOAD_THREADS = min(4, SYSTEM_THREADS // 2)
 CPU_THREADS = SYSTEM_THREADS - 1  # Leave one thread for system operations
 
-# Check for AMD GPU and VAAPI
-def check_amd_gpu():
-    """Check for AMD GPU and VAAPI support with detailed info"""
-    try:
-        # Check if we have the RX 6600 GPU
-        result = subprocess.run(['lspci'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        
-        # Get VAAPI capabilities
-        vaapi_info = {'available': False, 'hevc_encoding': False, 'device': '/dev/dri/renderD128'}
-        try:
-            # Check VAAPI details
-            vaapi_check = subprocess.run(['vainfo'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            if vaapi_check.returncode == 0:
-                vaapi_info['available'] = True
-                
-                # Look for HEVC encoding support
-                if 'VAProfileHEVCMain' in vaapi_check.stdout and 'VAEntrypointEncSlice' in vaapi_check.stdout:
-                    vaapi_info['hevc_encoding'] = True
-                
-                # Extract GPU model
-                gpu_model = 'AMD GPU'
-                model_match = re.search(r'for\s+(.+?)\s+\(', vaapi_check.stdout)
-                if model_match:
-                    gpu_model = model_match.group(1)
-                
-                # Try to find the correct render device
-                dev_nodes = ['/dev/dri/renderD128', '/dev/dri/renderD129']
-                for node in dev_nodes:
-                    if os.path.exists(node):
-                        vaapi_info['device'] = node
-                        break
-        except Exception as e:
-            logger.warning(f"Error checking VAAPI details: {e}")
-        
-        # Determine AMD GPU presence
-        if 'AMD' in result.stdout and ('RX 6600' in result.stdout or 'Radeon' in result.stdout or 'RDNA' in result.stdout):
-            gpu_model = 'AMD Radeon'
-            if 'RX 6600' in result.stdout:
-                gpu_model = 'AMD RX 6600'
-            
-            return {
-                'model': gpu_model,
-                'vaapi': vaapi_info['available'],
-                'hevc_encoding': vaapi_info['hevc_encoding'],
-                'device': vaapi_info['device']
-            }
-        
-        # No AMD GPU found
-        return {'model': 'Unknown', 'vaapi': False, 'hevc_encoding': False, 'device': None}
-    except Exception as e:
-        logger.error(f"Error checking AMD GPU: {e}")
-        return {'model': 'Unknown', 'vaapi': False, 'hevc_encoding': False, 'device': None}
+# FFmpeg configuration - Use ffmpeg from the same directory as the script
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+FFMPEG_PATH = os.path.join(SCRIPT_DIR, 'ffmpeg')
 
-# Get hardware acceleration information - AMD only
-AMD_GPU = check_amd_gpu()
-logger.info(f"Detected GPU: {AMD_GPU}")
+# Check if our local ffmpeg exists
+if not os.path.exists(FFMPEG_PATH):
+    # Fallback to system ffmpeg if local not found
+    FFMPEG_PATH = 'ffmpeg'
+    logger.warning(f"Local ffmpeg not found in {SCRIPT_DIR}, using system ffmpeg")
+else:
+    logger.info(f"Using local ffmpeg from {SCRIPT_DIR}")
+
+# Check for GPU and hardware acceleration on macOS
+def check_macos_gpu():
+    """Check for GPU and VideoToolbox support on macOS"""
+    try:
+        # Check system profiler for GPU information
+        result = subprocess.run(['system_profiler', 'SPDisplaysDataType'], 
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        
+        gpu_info = {'available': False, 'hevc_encoding': False, 'model': 'Unknown', 'videotoolbox': False}
+        
+        if result.returncode == 0:
+            output = result.stdout
+            
+            # Look for GPU models
+            if 'AMD' in output or 'Radeon' in output:
+                if 'RX 6600' in output:
+                    gpu_info['model'] = 'AMD RX 6600'
+                elif 'Radeon' in output:
+                    gpu_info['model'] = 'AMD Radeon'
+                else:
+                    gpu_info['model'] = 'AMD GPU'
+                gpu_info['available'] = True
+            elif 'Intel' in output:
+                gpu_info['model'] = 'Intel GPU'
+                gpu_info['available'] = True
+            elif 'Apple' in output or 'M1' in output or 'M2' in output or 'M3' in output:
+                if 'M1' in output:
+                    gpu_info['model'] = 'Apple M1'
+                elif 'M2' in output:
+                    gpu_info['model'] = 'Apple M2'
+                elif 'M3' in output:
+                    gpu_info['model'] = 'Apple M3'
+                else:
+                    gpu_info['model'] = 'Apple Silicon'
+                gpu_info['available'] = True
+                gpu_info['hevc_encoding'] = True  # Apple Silicon has excellent HEVC support
+        
+        # Check if VideoToolbox is available (should be on all modern macOS)
+        try:
+            # VideoToolbox is available on macOS 10.8+, so we assume it's available
+            gpu_info['videotoolbox'] = True
+            if gpu_info['available']:
+                gpu_info['hevc_encoding'] = True
+        except Exception as e:
+            logger.warning(f"Error checking VideoToolbox: {e}")
+        
+        return gpu_info
+        
+    except Exception as e:
+        logger.error(f"Error checking macOS GPU: {e}")
+        return {'model': 'Unknown', 'available': False, 'hevc_encoding': False, 'videotoolbox': False}
+
+# Get hardware acceleration information for macOS
+MACOS_GPU = check_macos_gpu()
+logger.info(f"Detected GPU: {MACOS_GPU}")
 
 # Check FFmpeg capabilities
 def check_ffmpeg():
     """Check FFmpeg version and available encoders"""
     try:
         # Check FFmpeg version
-        version_result = subprocess.run(['ffmpeg', '-version'], 
+        version_result = subprocess.run([FFMPEG_PATH, '-version'], 
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         
         if version_result.returncode != 0:
@@ -100,12 +115,12 @@ def check_ffmpeg():
         version = version_match.group(1) if version_match else "Unknown"
         
         # Check encoders
-        encoders_result = subprocess.run(['ffmpeg', '-encoders'], 
+        encoders_result = subprocess.run([FFMPEG_PATH, '-encoders'], 
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         
         encoders = {
-            'hevc_vaapi': 'hevc_vaapi' in encoders_result.stdout,
-            'h264_vaapi': 'h264_vaapi' in encoders_result.stdout,
+            'hevc_videotoolbox': 'hevc_videotoolbox' in encoders_result.stdout,
+            'h264_videotoolbox': 'h264_videotoolbox' in encoders_result.stdout,
             'libx265': 'libx265' in encoders_result.stdout,
             'libx264': 'libx264' in encoders_result.stdout,
         }
@@ -145,6 +160,9 @@ def update_progress_bar(percentage):
     """Updates the progress bar in the interface"""
     progress_bar['value'] = percentage
     progress_label.config(text=f"Downloading: {percentage:.1f}%")
+    # Only log every 10% to avoid spam
+    if int(percentage) % 10 == 0:
+        log_message(f"Download progress: {percentage:.1f}%")
 
 @lru_cache(maxsize=64)
 def get_youtube_object(url):
@@ -184,42 +202,34 @@ def get_best_streams(url):
         raise
 
 def set_process_priority():
-    """Set the process priority to maximum for faster performance"""
+    """Set the process priority to maximum for faster performance on macOS"""
     try:
-        # Unix/Linux priority
-        os.nice(-20)  # Requires root privileges to go below 0
+        # macOS priority adjustment - only if running as root
+        if os.geteuid() == 0:
+            os.nice(-10)
+        else:
+            # For normal users, use a smaller value
+            os.nice(-5)
     except Exception as e:
-        logger.warning(f"Could not set process priority (might need sudo): {str(e)}")
+        # This is expected for normal users, don't log as warning
+        logger.debug(f"Process priority adjustment skipped: {str(e)}")
 
 def optimize_system_resources():
-    """Optimize system resources for maximum processing speed in Linux"""
+    """Optimize system resources for maximum processing speed on macOS"""
     try:
-        # On Linux, we can set the process scheduling policy
-        # This requires root privileges
+        # On macOS, we have more limited options for process optimization
         try:
-            import ctypes
-            libc = ctypes.CDLL('libc.so.6')
-            
-            # Try to set SCHED_FIFO policy
-            # This requires root
-            SCHED_FIFO = 1
-            class sched_param(ctypes.Structure):
-                _fields_ = [("sched_priority", ctypes.c_int)]
-            
-            param = sched_param(99)  # Max priority
-            result = libc.sched_setscheduler(0, SCHED_FIFO, ctypes.byref(param))
-            if result != 0:
-                # If failed, try to increase nice value
-                os.nice(-10)  # Try a modest priority boost
+            # Try to increase nice value (more conservative on macOS)
+            os.nice(-5)  # Modest priority boost for macOS
         except Exception as e:
-            logger.debug(f"Could not set scheduler policy: {e}")
+            logger.debug(f"Could not set process priority: {e}")
             
-        # Try to set IO priority to Realtime
+        # macOS doesn't have ionice, but we can try to optimize other aspects
         try:
-            subprocess.run(['ionice', '-c', '1', '-n', '0', '-p', str(os.getpid())], 
-                          check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Set environment variables for better performance
+            os.environ['MALLOC_ARENA_MAX'] = '4'  # Limit memory arenas
         except Exception as e:
-            logger.debug(f"Could not set IO priority: {e}")
+            logger.debug(f"Could not set performance environment: {e}")
     except Exception as e:
         logger.warning(f"Could not optimize system resources: {str(e)}")
 
@@ -260,6 +270,7 @@ def run_ffmpeg_command(command, progress_callback=None):
         frame_count = 0
         fps_stats = []
         last_fps_time = start_time
+        last_progress_update = start_time
         
         # Process stdout for progress
         if process.stdout:
@@ -269,9 +280,13 @@ def run_ffmpeg_command(command, progress_callback=None):
                     if line.startswith('out_time_ms='):
                         try:
                             time_ms = int(line.split('=')[1])
-                            if duration_seconds:
-                                progress = min(100, (time_ms / 1000000) / duration_seconds * 100)
-                                progress_callback(progress)
+                            current_time = time.time()
+                            # Update progress every 0.5 seconds
+                            if current_time - last_progress_update >= 0.5:
+                                if duration_seconds:
+                                    progress = min(100, (time_ms / 1000000) / duration_seconds * 100)
+                                    progress_callback(progress)
+                                    last_progress_update = current_time
                         except (ValueError, ZeroDivisionError):
                             pass
                     elif line.startswith('duration='):
@@ -287,21 +302,25 @@ def run_ffmpeg_command(command, progress_callback=None):
                             frame_count = int(line.split('=')[1])
                             stats['total_frames'] = frame_count
                             
-                            # Calculate current FPS (every 3 seconds)
+                            # Calculate current FPS
                             current_time = time.time()
-                            if current_time - last_fps_time >= 3 and frame_count > 0:
-                                elapsed = current_time - start_time
-                                current_fps = frame_count / elapsed if elapsed > 0 else 0
+                            elapsed = current_time - start_time
+                            if elapsed > 0:
+                                current_fps = frame_count / elapsed
                                 fps_stats.append(current_fps)
+                                if len(fps_stats) > 10:  # Keep only last 10 FPS measurements
+                                    fps_stats.pop(0)
                                 avg_fps = sum(fps_stats) / len(fps_stats)
                                 stats['avg_fps'] = avg_fps
                                 
-                                # Update progress with FPS info
-                                if progress_callback and duration_seconds:
-                                    progress = min(100, (frame_count / (duration_seconds * avg_fps)) * 100) if avg_fps > 0 else 0
-                                    progress_callback(progress, f"Encoding at {avg_fps:.1f} FPS")
-                                
-                                last_fps_time = current_time
+                                # Update progress with FPS info every 0.5 seconds
+                                if current_time - last_fps_time >= 0.5:
+                                    if progress_callback and duration_seconds and avg_fps > 0:
+                                        # Estimate progress based on frames
+                                        estimated_total_frames = duration_seconds * 30  # Assume 30 fps average
+                                        progress = min(100, (frame_count / estimated_total_frames) * 100)
+                                        progress_callback(progress, f"Encoding at {avg_fps:.1f} FPS")
+                                    last_fps_time = current_time
                         except (ValueError, ZeroDivisionError):
                             pass
         
@@ -326,96 +345,41 @@ def run_ffmpeg_command(command, progress_callback=None):
         logger.error(f"Error running FFmpeg: {str(e)}")
         return False, stats
 
-def merge_audio_video_with_amd_hevc(video_path, audio_path, output_path, progress_callback=None):
-    """Combine audio and video with AMD RX 6600 GPU acceleration using HEVC (H.265)"""
-    if not AMD_GPU['vaapi'] or not AMD_GPU['hevc_encoding']:
-        logger.warning("HEVC encoding via VAAPI not available, falling back to CPU")
+def merge_audio_video_with_videotoolbox(video_path, audio_path, output_path, progress_callback=None):
+    """Combine audio and video with macOS VideoToolbox hardware acceleration using HEVC (H.265)"""
+    if not MACOS_GPU['videotoolbox'] or not MACOS_GPU['hevc_encoding']:
+        logger.warning("HEVC encoding via VideoToolbox not available, falling back to CPU")
         return False, {}
     
     try:
-        # Get video details
-        probe_cmd = [
-            'ffprobe', 
-            '-v', 'error', 
-            '-select_streams', 'v:0', 
-            '-show_entries', 'stream=width,height,r_frame_rate', 
-            '-of', 'csv=p=0',
-            video_path
-        ]
-        
-        probe_result = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if probe_result.returncode == 0:
-            # Parse video information
-            width, height, framerate = probe_result.stdout.strip().split(',')
-            logger.info(f"Video details: {width}x{height} @ {framerate}")
-            
-            # Some VAAPI implementations have limitations at higher resolutions
-            is_high_res = int(width) > 1920 or int(height) > 1080
-            
-            # Extract the actual frame rate value
-            try:
-                frame_rate_nums = framerate.split('/')
-                actual_framerate = float(frame_rate_nums[0]) / float(frame_rate_nums[1])
-                logger.info(f"Calculated frame rate: {actual_framerate:.2f} FPS")
-            except (ValueError, ZeroDivisionError, IndexError):
-                actual_framerate = 30
-                logger.warning(f"Could not parse frame rate, using default: {actual_framerate} FPS")
-        else:
-            logger.warning("Could not get video details, using default parameters")
-            is_high_res = False
-            actual_framerate = 30
-        
-        # Build FFmpeg command for AMD GPU HEVC encoding via VAAPI
+        # Build FFmpeg command for macOS VideoToolbox HEVC encoding
         command = [
-            'ffmpeg',
+            FFMPEG_PATH,
             '-y',  # Overwrite output files without asking
             '-i', video_path,  # Video input
             '-i', audio_path,  # Audio input
-            '-c:v', 'hevc_vaapi',  # HEVC via VAAPI
-            '-vaapi_device', AMD_GPU['device'],  # VAAPI device
-            '-vf', 'format=nv12,hwupload',  # Required format conversion
-        ]
-        
-        # Add quality settings based on resolution
-        if is_high_res:
-            # Higher quality for high-res content
-            quality_params = [
-                '-qp', '24',          # QP value (lower = better quality)
-                '-rc_mode', 'CQP',    # Constant Quality mode
-                '-b:v', '6M',         # Higher bitrate for high-res
-            ]
-        else:
-            # Standard quality for normal content
-            quality_params = [
-                '-qp', '26',          # QP value
-                '-rc_mode', 'CQP',    # Constant Quality mode
-                '-b:v', '4M',         # Bitrate
-            ]
-        
-        command.extend(quality_params)
-        
-        # Add common parameters
-        command.extend([
+            '-c:v', 'hevc_videotoolbox',  # HEVC via VideoToolbox
+            '-b:v', '6M',         # Bitrate (VideoToolbox doesn't support -q:v)
             '-c:a', 'aac',            # Audio codec
             '-b:a', '192k',           # Audio bitrate
             '-max_muxing_queue_size', '1024',  # Prevent muxing errors
             '-threads', str(CPU_THREADS),  # Use available CPU threads
             output_path
-        ])
+        ]
         
         # Run the command
-        logger.info("Starting encoding with AMD RX 6600 HEVC via VAAPI...")
+        logger.info("Starting encoding with macOS VideoToolbox HEVC...")
         success, stats = run_ffmpeg_command(command, progress_callback)
         
         if success:
-            logger.info(f"Successfully processed with VAAPI HEVC. Average FPS: {stats.get('avg_fps', 0):.1f}")
+            logger.info(f"Successfully processed with VideoToolbox HEVC. Average FPS: {stats.get('avg_fps', 0):.1f}")
             return True, stats
         else:
-            logger.error("VAAPI HEVC encoding failed")
+            logger.error("VideoToolbox HEVC encoding failed")
             return False, stats
             
     except Exception as e:
-        logger.error(f"Error with AMD HEVC encoding: {str(e)}")
+        logger.error(f"Error with VideoToolbox HEVC encoding: {str(e)}")
         return False, {}
 
 def merge_audio_video_with_cpu(video_path, audio_path, output_path, progress_callback=None):
@@ -423,7 +387,7 @@ def merge_audio_video_with_cpu(video_path, audio_path, output_path, progress_cal
     try:
         # Build command for CPU-based HEVC encoding
         command = [
-            'ffmpeg',
+            FFMPEG_PATH,
             '-y',
             '-i', video_path,
             '-i', audio_path,
@@ -448,7 +412,7 @@ def merge_audio_video_with_cpu(video_path, audio_path, output_path, progress_cal
         # If HEVC failed, try H.264
         logger.info("CPU HEVC encoding failed, trying H.264...")
         command = [
-            'ffmpeg',
+            FFMPEG_PATH,
             '-y',
             '-i', video_path,
             '-i', audio_path,
@@ -479,18 +443,18 @@ def merge_audio_video_with_cpu(video_path, audio_path, output_path, progress_cal
         return False, {}
 
 def merge_audio_video(video_path, audio_path, output_path, progress_callback=None):
-    """Main function to combine audio and video with AMD RX 6600 acceleration"""
+    """Main function to combine audio and video with macOS hardware acceleration"""
     # Increase process priority
     set_process_priority()
     
-    # Try AMD hardware acceleration with HEVC (H.265)
-    if AMD_GPU['vaapi'] and AMD_GPU['hevc_encoding']:
+    # Try macOS VideoToolbox hardware acceleration with HEVC (H.265)
+    if MACOS_GPU['videotoolbox'] and MACOS_GPU['hevc_encoding']:
         try:
-            success, stats = merge_audio_video_with_amd_hevc(video_path, audio_path, output_path, progress_callback)
+            success, stats = merge_audio_video_with_videotoolbox(video_path, audio_path, output_path, progress_callback)
             if success:
                 return True, stats
         except Exception as e:
-            logger.error(f"AMD HEVC encoding failed: {str(e)}")
+            logger.error(f"VideoToolbox HEVC encoding failed: {str(e)}")
     
     # If hardware encoding failed or not available, try CPU encoding
     logger.info("Using CPU encoding fallback...")
@@ -514,25 +478,36 @@ def update_encode_progress(percentage, status_text=None):
     root.after(0, lambda: progress_bar.config(value=percentage))
     if status_text:
         root.after(0, lambda: progress_label.config(text=status_text))
+        root.after(0, lambda: log_message(status_text))
     else:
-        root.after(0, lambda: progress_label.config(text=f"Encoding: {percentage:.1f}%"))
+        text = f"Encoding: {percentage:.1f}%"
+        root.after(0, lambda: progress_label.config(text=text))
+        if percentage % 10 == 0:  # Log every 10%
+            root.after(0, lambda: log_message(f"Encoding progress: {percentage:.1f}%"))
 
 def download_in_thread(url, output_folder):
     """Handles the download in a separate thread"""
     try:
+        # Log start of download
+        root.after(0, lambda: log_message("Starting download process..."))
+        
         # Optimize system resources
         optimize_system_resources()
         
         # Create the output directory if it doesn't exist
         os.makedirs(output_folder, exist_ok=True)
+        root.after(0, lambda: log_message(f"Output directory: {output_folder}"))
         
         # Get the best streams
+        root.after(0, lambda: log_message("Analyzing video streams..."))
         video_stream, audio_stream, needs_merge = get_best_streams(url)
         if not video_stream:
+            root.after(0, lambda: log_message("ERROR: No suitable stream found", "ERROR"))
             root.after(0, lambda: messagebox.showerror("Error", "No suitable stream found for this video."))
             return
 
         resolution = video_stream.resolution
+        root.after(0, lambda: log_message(f"Best quality found: {resolution}"))
         root.after(0, lambda: progress_label.config(text=f"Starting download in {resolution}..."))
         
         if needs_merge:
@@ -552,8 +527,8 @@ def download_in_thread(url, output_folder):
                 video_path = video_future.result()
                 audio_path = audio_future.result()
             
-            # Combine files with AMD RX 6600 acceleration
-            acceleration = "AMD RX 6600 VAAPI" if AMD_GPU['vaapi'] and AMD_GPU['hevc_encoding'] else "CPU"
+            # Combine files with macOS hardware acceleration
+            acceleration = f"{MACOS_GPU['model']} VideoToolbox" if MACOS_GPU['videotoolbox'] and MACOS_GPU['hevc_encoding'] else "CPU"
             root.after(0, lambda: progress_label.config(text=f"Combining with {acceleration} HEVC acceleration..."))
             
             # Create a more specific filename with HEVC notation
@@ -575,7 +550,7 @@ def download_in_thread(url, output_folder):
                 
                 # Show success message with HEVC info and performance stats
                 codec_info = "HEVC (H.265)"
-                gpu_model = AMD_GPU['model'] if (AMD_GPU['vaapi'] and AMD_GPU['hevc_encoding']) else "CPU"
+                gpu_model = MACOS_GPU['model'] if (MACOS_GPU['videotoolbox'] and MACOS_GPU['hevc_encoding']) else "CPU"
                 fps_info = f"{stats.get('avg_fps', 0):.1f} FPS" if stats.get('avg_fps', 0) > 0 else "Unknown FPS"
                 
                 success_msg = (f"Video successfully downloaded and processed with high quality\n"
@@ -665,163 +640,464 @@ def paste_from_clipboard():
     except:
         pass
 
-def toggle_dark_mode():
-    """Toggles between light and dark mode"""
-    if toggle_dark_mode.is_dark_mode:
-        # Switch to light mode
-        root.config(bg="#f0f0f0")
-        frame.config(bg="#f0f0f0")
-        url_frame.config(bg="#f0f0f0")
-        out_frame.config(bg="#f0f0f0")
-        button_frame.config(bg="#f0f0f0")
-        progress_frame.config(bg="#f0f0f0")
-        for label in root.winfo_children():
-            if isinstance(label, tk.Label):
-                label.config(bg="#f0f0f0", fg="#000000")
-        for frame_widget in frame.winfo_children():
-            if isinstance(frame_widget, tk.Frame):
-                frame_widget.config(bg="#f0f0f0")
-                for label in frame_widget.winfo_children():
-                    if isinstance(label, tk.Label):
-                        label.config(bg="#f0f0f0", fg="#000000")
-        
-        # Reset button and progressbar colors
-        amd_red = "#ED1C24"
-        style.configure("TButton", background=amd_red, foreground="white")
-        style.configure("TProgressbar", background=amd_red)
-        
-        dark_mode_button.config(text="Dark Mode")
-        toggle_dark_mode.is_dark_mode = False
-    else:
-        # Switch to dark mode - AMD themed dark mode
-        amd_dark = "#2D2D2D"
-        amd_red = "#ED1C24"
-        
-        root.config(bg=amd_dark)
-        frame.config(bg=amd_dark)
-        url_frame.config(bg=amd_dark)
-        out_frame.config(bg=amd_dark)
-        button_frame.config(bg=amd_dark)
-        progress_frame.config(bg=amd_dark)
-        for label in root.winfo_children():
-            if isinstance(label, tk.Label):
-                label.config(bg=amd_dark, fg="#ffffff")
-        for frame_widget in frame.winfo_children():
-            if isinstance(frame_widget, tk.Frame):
-                frame_widget.config(bg=amd_dark)
-                for label in frame_widget.winfo_children():
-                    if isinstance(label, tk.Label):
-                        label.config(bg=amd_dark, fg="#ffffff")
-        
-        # Keep AMD red for buttons
-        style.configure("TButton", background=amd_red, foreground="white")
-        style.configure("TProgressbar", background=amd_red)
-        
-        dark_mode_button.config(text="Light Mode")
-        toggle_dark_mode.is_dark_mode = True
+# macOS Color Scheme
+MACOS_COLORS = {
+    'light': {
+        'bg': '#FFFFFF',
+        'secondary_bg': '#F5F5F7',
+        'card_bg': '#FFFFFF',
+        'text': '#1D1D1F',
+        'secondary_text': '#86868B',
+        'accent': '#007AFF',
+        'success': '#30D158',
+        'warning': '#FF9F0A',
+        'error': '#FF3B30',
+        'border': '#D2D2D7',
+        'input_bg': '#F2F2F7',
+        'shadow': '#00000010'
+    },
+    'dark': {
+        'bg': '#1C1C1E',
+        'secondary_bg': '#2C2C2E',
+        'card_bg': '#2C2C2E',
+        'text': '#FFFFFF',
+        'secondary_text': '#8E8E93',
+        'accent': '#0A84FF',
+        'success': '#32D74B',
+        'warning': '#FF9F0A',
+        'error': '#FF453A',
+        'border': '#38383A',
+        'input_bg': '#1C1C1E',
+        'shadow': '#00000030'
+    }
+}
 
-# Initialize dark mode state
-toggle_dark_mode.is_dark_mode = False
+# Global theme state
+current_theme = 'light'
+
+def detect_system_theme():
+    """Detect if macOS is using dark mode"""
+    try:
+        # Use macOS command to check dark mode
+        result = subprocess.run(['defaults', 'read', '-g', 'AppleInterfaceStyle'], 
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return 'dark' if result.returncode == 0 else 'light'
+    except:
+        return 'light'
+
+def get_color(key):
+    """Get color from current theme"""
+    return MACOS_COLORS[current_theme][key]
+
+# Custom logging handler for GUI
+class GUILogHandler(logging.Handler):
+    def __init__(self, log_widget):
+        super().__init__()
+        self.log_widget = log_widget
+        
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            timestamp = time.strftime("%H:%M:%S", time.localtime(record.created))
+            
+            # Color coding based on level
+            if record.levelno >= logging.ERROR:
+                icon = "🔴"
+                color = "#FF453A"
+            elif record.levelno >= logging.WARNING:
+                icon = "🟡"
+                color = "#FF9F0A"
+            elif record.levelno >= logging.INFO:
+                icon = "🔵"
+                color = "#0A84FF"
+            else:
+                icon = "⚪"
+                color = "#8E8E93"
+            
+            formatted_msg = f"[{timestamp}] {icon} {msg}\n"
+            
+            # Update GUI in main thread
+            if hasattr(self.log_widget, 'after'):
+                self.log_widget.after(0, self._update_log, formatted_msg, color)
+        except Exception:
+            pass
+    
+    def _update_log(self, message, color="#8E8E93"):
+        try:
+            self.log_widget.config(state=tk.NORMAL)
+            self.log_widget.insert(tk.END, message)
+            self.log_widget.see(tk.END)
+            self.log_widget.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
+def log_message(message, level="INFO"):
+    """Add message to log with timestamp and color coding"""
+    timestamp = time.strftime("%H:%M:%S")
+    
+    # Color coding based on level
+    if level == "ERROR":
+        icon = "🔴"
+    elif level == "WARNING":
+        icon = "🟡"
+    elif level == "SUCCESS":
+        icon = "🟢"
+    elif level == "INFO":
+        icon = "🔵"
+    else:
+        icon = "⚪"
+    
+    formatted_message = f"[{timestamp}] {icon} {message}\n"
+    
+    try:
+        if 'log_text' in globals() and log_text:
+            log_text.config(state=tk.NORMAL)
+            log_text.insert(tk.END, formatted_message)
+            log_text.see(tk.END)
+            log_text.config(state=tk.DISABLED)
+    except:
+        pass
+
+def toggle_theme():
+    """Toggle between light and dark theme"""
+    global current_theme
+    current_theme = 'dark' if current_theme == 'light' else 'light'
+    apply_theme()
+
+def apply_theme():
+    """Apply current theme to all widgets"""
+    try:
+        # Main window
+        root.config(bg=get_color('bg'))
+        
+        # Main container
+        main_container.config(bg=get_color('bg'))
+        
+        # Input section
+        input_section.config(bg=get_color('card_bg'), highlightbackground=get_color('border'))
+        url_label.config(bg=get_color('card_bg'), fg=get_color('text'))
+        folder_label.config(bg=get_color('card_bg'), fg=get_color('text'))
+        url_frame.config(bg=get_color('card_bg'))
+        folder_frame.config(bg=get_color('card_bg'))
+        url_entry.config(bg=get_color('input_bg'), fg=get_color('text'), 
+                        insertbackground=get_color('text'), highlightbackground=get_color('accent'))
+        output_entry.config(bg=get_color('input_bg'), fg=get_color('text'), 
+                           insertbackground=get_color('text'), highlightbackground=get_color('accent'))
+        
+        # Progress section
+        progress_section.config(bg=get_color('card_bg'), highlightbackground=get_color('border'))
+        progress_title.config(bg=get_color('card_bg'), fg=get_color('text'))
+        progress_label.config(bg=get_color('card_bg'), fg=get_color('secondary_text'))
+        
+        # Log section
+        log_section.config(bg=get_color('card_bg'), highlightbackground=get_color('border'))
+        log_title.config(bg=get_color('card_bg'), fg=get_color('text'))
+        log_frame.config(bg=get_color('card_bg'))
+        log_text.config(bg=get_color('input_bg'), fg=get_color('text'), 
+                       insertbackground=get_color('text'))
+        
+        # Update button styles
+        style.configure("Accent.TButton", 
+                       background=get_color('accent'),
+                       foreground='white',
+                       borderwidth=0,
+                       focuscolor='none',
+                       relief='flat')
+        
+        style.map("Accent.TButton",
+                  background=[('active', get_color('accent')),
+                             ('pressed', get_color('accent'))],
+                  foreground=[('active', 'white'),
+                             ('pressed', 'white')])
+        
+        style.configure("Secondary.TButton",
+                       background=get_color('secondary_bg'),
+                       foreground=get_color('text'),
+                       borderwidth=1,
+                       focuscolor='none',
+                       relief='flat')
+        
+        style.map("Secondary.TButton",
+                  background=[('active', get_color('border')),
+                             ('pressed', get_color('secondary_bg'))],
+                  foreground=[('active', get_color('text')),
+                             ('pressed', get_color('text'))])
+        
+        style.configure("TProgressbar",
+                       background=get_color('accent'),
+                       troughcolor=get_color('secondary_bg'),
+                       borderwidth=0,
+                       lightcolor=get_color('accent'),
+                       darkcolor=get_color('accent'))
+    except:
+        pass
 
 def create_gui():
-    """Creates the program's graphical interface"""
-    global root, url_entry, output_entry, download_button, progress_frame, progress_bar, progress_label
-    global frame, url_frame, out_frame, button_frame, style, dark_mode_button
+    """Creates the modern macOS-style GUI"""
+    global root, url_entry, output_entry, download_button, progress_bar, progress_label
+    global main_container, input_section, url_label, folder_label, progress_section, progress_title
+    global log_section, log_title, log_text, log_frame, style
+    global url_frame, folder_frame, progress_frame, current_theme
     
-    # Create window
+    # Detect system theme
+    current_theme = detect_system_theme()
+    
+    # Create main window
     root = tk.Tk()
-    root.title("WampyTube: YouTube Downloader (3.0) - AMD RX 6600 HEVC Edition")
+    root.title("WampyTube - YouTube Downloader")
+    root.geometry("800x700")
+    center_window(root, 800, 700)
+    root.resizable(True, True)
+    root.minsize(700, 600)
     
-    # Center the window
-    center_window(root, 550, 320)
-    root.resizable(False, False)
+    # Set window icon if available
+    try:
+        icon_path = os.path.join(SCRIPT_DIR, 'icon.png')
+        if os.path.exists(icon_path):
+            # For macOS, we need to use iconphoto
+            icon = tk.PhotoImage(file=icon_path)
+            root.iconphoto(True, icon)
+    except Exception as e:
+        logger.debug(f"Could not set icon: {e}")
     
-    # Widget style - Use AMD red theme
+    # Configure ttk styles
     style = ttk.Style()
-    style.theme_use('clam')  # Use a modern theme
+    style.theme_use('clam')
     
-    # AMD-inspired color scheme (red accents)
-    amd_red = "#ED1C24"
-    amd_dark = "#2D2D2D"
+    # Configure initial styles before creating widgets
+    style.configure("Accent.TButton", 
+                   background=get_color('accent'),
+                   foreground='white',
+                   borderwidth=0,
+                   focuscolor='none',
+                   relief='flat')
     
-    style.configure("TButton", padding=6, relief="flat", background=amd_red, foreground="white")
-    style.configure("TProgressbar", thickness=20, troughcolor="#f0f0f0", background=amd_red)
+    style.map("Accent.TButton",
+              background=[('active', get_color('accent')),
+                         ('pressed', get_color('accent'))],
+              foreground=[('active', 'white'),
+                         ('pressed', 'white')])
     
-    # Main frame
-    frame = tk.Frame(root, padx=15, pady=15)
-    frame.pack(fill=tk.BOTH, expand=True)
+    style.configure("Secondary.TButton",
+                   background=get_color('secondary_bg'),
+                   foreground=get_color('text'),
+                   borderwidth=1,
+                   focuscolor='none',
+                   relief='flat')
     
-    # URL field
-    url_frame = tk.Frame(frame)
-    url_frame.pack(fill=tk.X, pady=5)
+    style.map("Secondary.TButton",
+              background=[('active', get_color('border')),
+                         ('pressed', get_color('secondary_bg'))],
+              foreground=[('active', get_color('text')),
+                         ('pressed', get_color('text'))])
     
-    tk.Label(url_frame, text="Video URL:", anchor="w").pack(side=tk.LEFT)
-    url_entry = tk.Entry(url_frame, width=50)
-    url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+    style.configure("TProgressbar",
+                   background=get_color('accent'),
+                   troughcolor=get_color('secondary_bg'),
+                   borderwidth=0,
+                   lightcolor=get_color('accent'),
+                   darkcolor=get_color('accent'))
     
-    # Paste button
-    ttk.Button(url_frame, text="Paste", width=8, command=paste_from_clipboard).pack(side=tk.RIGHT)
+    # Main container with padding
+    main_container = tk.Frame(root, bg=get_color('bg'))
+    main_container.pack(fill=tk.BOTH, expand=True, padx=30, pady=30)
     
-    # Output folder field
-    out_frame = tk.Frame(frame)
-    out_frame.pack(fill=tk.X, pady=10)
+    # Input section
+    input_section = tk.Frame(
+        main_container,
+        bg=get_color('card_bg'),
+        relief=tk.SOLID,
+        bd=1,
+        highlightbackground=get_color('border'),
+        highlightthickness=1
+    )
+    input_section.pack(fill=tk.X, pady=(0, 20))
     
-    tk.Label(out_frame, text="Output folder:", anchor="w").pack(side=tk.LEFT)
-    output_entry = tk.Entry(out_frame, width=40)
-    output_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-    ttk.Button(out_frame, text="Select", width=10, command=select_output_folder).pack(side=tk.RIGHT)
+    # URL input
+    url_label = tk.Label(
+        input_section,
+        text="YouTube URL",
+        font=("SF Pro Text", 14, "bold"),
+        bg=get_color('card_bg'),
+        fg=get_color('text')
+    )
+    url_label.pack(anchor=tk.W, padx=20, pady=(20, 5))
     
-    # Set default download directory
-    default_download_dir = os.path.join(Path.home(), "Downloads")
-    if os.path.exists(default_download_dir):
-        output_entry.insert(0, default_download_dir)
+    url_frame = tk.Frame(input_section, bg=get_color('card_bg'))
+    url_frame.pack(fill=tk.X, padx=20, pady=(0, 15))
     
-    # Progress bar frame
-    progress_frame = tk.Frame(root, padx=15)
-    progress_bar = ttk.Progressbar(progress_frame, length=500, mode='determinate', style="TProgressbar")
-    progress_bar.pack(fill=tk.X, pady=5)
-    progress_label = tk.Label(progress_frame, text="", anchor="center")
-    progress_label.pack(fill=tk.X)
+    url_entry = tk.Entry(
+        url_frame,
+        font=("SF Pro Text", 13),
+        bg=get_color('input_bg'),
+        fg=get_color('text'),
+        insertbackground=get_color('text'),
+        relief=tk.FLAT,
+        bd=8
+    )
+    url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
     
-    # Button frame
-    button_frame = tk.Frame(frame)
-    button_frame.pack(pady=15)
+    paste_button = ttk.Button(
+        url_frame,
+        text="Paste",
+        command=paste_from_clipboard,
+        style="Secondary.TButton",
+        width=8
+    )
+    paste_button.pack(side=tk.RIGHT, padx=(10, 0))
+    
+    # Output folder
+    folder_label = tk.Label(
+        input_section,
+        text="Output Folder",
+        font=("SF Pro Text", 14, "bold"),
+        bg=get_color('card_bg'),
+        fg=get_color('text')
+    )
+    folder_label.pack(anchor=tk.W, padx=20, pady=(0, 5))
+    
+    folder_frame = tk.Frame(input_section, bg=get_color('card_bg'))
+    folder_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
+    
+    output_entry = tk.Entry(
+        folder_frame,
+        font=("SF Pro Text", 13),
+        bg=get_color('input_bg'),
+        fg=get_color('text'),
+        insertbackground=get_color('text'),
+        relief=tk.FLAT,
+        bd=8
+    )
+    output_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    
+    browse_button = ttk.Button(
+        folder_frame,
+        text="Browse",
+        command=select_output_folder,
+        style="Secondary.TButton",
+        width=8
+    )
+    browse_button.pack(side=tk.RIGHT, padx=(10, 0))
     
     # Download button
     download_button = ttk.Button(
-        button_frame, 
-        text="DOWNLOAD", 
-        command=download_video, 
-        width=20,
-        style="TButton"
+        input_section,
+        text="Download Video",
+        command=download_video,
+        style="Accent.TButton"
     )
-    download_button.pack(side=tk.LEFT, padx=10)
+    download_button.pack(pady=(0, 20))
     
-    # Dark mode toggle button
-    dark_mode_button = ttk.Button(
-        button_frame,
-        text="Dark Mode",
-        command=toggle_dark_mode,
-        width=15,
-        style="TButton"
+    # Progress section
+    progress_section = tk.Frame(
+        main_container,
+        bg=get_color('card_bg'),
+        relief=tk.SOLID,
+        bd=1,
+        highlightbackground=get_color('border'),
+        highlightthickness=1
     )
-    dark_mode_button.pack(side=tk.LEFT, padx=10)
+    progress_section.pack(fill=tk.X, pady=(0, 20))
     
-    # Hardware acceleration info label
-    gpu_model = AMD_GPU['model'] if AMD_GPU['vaapi'] else "AMD GPU not detected"
-    hw_info_label = tk.Label(
-        root, 
-        text=f"{gpu_model} • HEVC (H.265) • {SYSTEM_CORES} Cores/{SYSTEM_THREADS} Threads",
-        fg="#888888"
+    progress_title = tk.Label(
+        progress_section,
+        text="Progress",
+        font=("SF Pro Text", 14, "bold"),
+        bg=get_color('card_bg'),
+        fg=get_color('text')
     )
-    hw_info_label.pack(side=tk.BOTTOM, pady=2)
+    progress_title.pack(anchor=tk.W, padx=20, pady=(15, 5))
     
-    # Version text
-    version_label = tk.Label(root, text="WampyTube 3.0 - AMD RX 6600 HEVC Edition", fg="#888888")
-    version_label.pack(side=tk.BOTTOM, pady=2)
+    progress_frame = tk.Frame(progress_section, bg=get_color('card_bg'))
+    progress_frame.pack(fill=tk.X, padx=20, pady=(0, 15))
+    
+    progress_bar = ttk.Progressbar(
+        progress_frame,
+        mode='determinate'
+    )
+    progress_bar.pack(fill=tk.X, pady=(0, 8))
+    
+    progress_label = tk.Label(
+        progress_frame,
+        text="Ready to download",
+        font=("SF Pro Text", 12),
+        bg=get_color('card_bg'),
+        fg=get_color('secondary_text')
+    )
+    progress_label.pack(anchor=tk.W)
+    
+    # Log section
+    log_section = tk.Frame(
+        main_container,
+        bg=get_color('card_bg'),
+        relief=tk.SOLID,
+        bd=1,
+        highlightbackground=get_color('border'),
+        highlightthickness=1
+    )
+    log_section.pack(fill=tk.BOTH, expand=True)
+    
+    log_title = tk.Label(
+        log_section,
+        text="Activity Log",
+        font=("SF Pro Text", 14, "bold"),
+        bg=get_color('card_bg'),
+        fg=get_color('text')
+    )
+    log_title.pack(anchor=tk.W, padx=20, pady=(15, 5))
+    
+    log_frame = tk.Frame(log_section, bg=get_color('card_bg'))
+    log_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
+    
+    # Log text with scrollbar
+    log_text = tk.Text(
+        log_frame,
+        font=("SF Mono", 11),
+        bg=get_color('input_bg'),
+        fg=get_color('text'),
+        insertbackground=get_color('text'),
+        relief=tk.FLAT,
+        bd=8,
+        state=tk.DISABLED,
+        wrap=tk.WORD
+    )
+    
+    scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=log_text.yview)
+    log_text.configure(yscrollcommand=scrollbar.set)
+    
+    log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    # Apply initial theme
+    apply_theme()
+    
+    # Set up logging without duplication
+    # Clear any existing handlers
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    # Add only the GUI handler
+    gui_handler = GUILogHandler(log_text)
+    gui_handler.setFormatter(logging.Formatter('%(message)s'))
+    gui_handler.setLevel(logging.INFO)
+    logger.addHandler(gui_handler)
+    logger.setLevel(logging.INFO)
+    
+    # Initial log message - only log once
+    cpu_info = f"{SYSTEM_CORES} cores, {SYSTEM_THREADS} threads"
+    gpu_info = MACOS_GPU['model'] if MACOS_GPU['available'] else "No GPU detected"
+    ffmpeg_info = f"FFmpeg {FFMPEG_INFO.get('version', 'Unknown')}" if FFMPEG_INFO.get('available') else "FFmpeg not found"
+    
+    log_message("WampyTube initialized successfully")
+    log_message(f"System: {gpu_info} • {cpu_info}")
+    log_message(f"FFmpeg: {ffmpeg_info}")
     
     # Bind Enter key to download button
     root.bind('<Return>', lambda event: download_video())
+    
+    # Set default output folder to Downloads
+    downloads_folder = os.path.expanduser("~/Downloads")
+    output_entry.insert(0, downloads_folder)
     
     return root
 
