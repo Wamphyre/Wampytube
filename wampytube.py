@@ -158,14 +158,22 @@ class WampyTubeApp(ctk.CTk):
             menubar = tk.Menu(self)
             self.config(menu=menubar)
             
-            # Create WampyTube menu (main app menu)
-            app_menu = tk.Menu(menubar, tearoff=0)
-            menubar.add_cascade(label="WampyTube", menu=app_menu)
+            # Create the main application menu (this will be the leftmost menu)
+            # On macOS, this automatically becomes the app menu with the app name
+            app_menu = tk.Menu(menubar, tearoff=0, name='apple')
+            menubar.add_cascade(menu=app_menu)
             
-            # Add About menu item
+            # Add About menu item to the main app menu
             app_menu.add_command(label="About WampyTube", command=self.show_about_dialog)
             app_menu.add_separator()
             app_menu.add_command(label="Quit WampyTube", command=self.quit_app, accelerator="Cmd+Q")
+            
+            # Set up macOS-specific menu commands
+            try:
+                self.createcommand('tkAboutDialog', self.show_about_dialog)
+                self.createcommand('tk::mac::ShowPreferences', self.show_about_dialog)
+            except:
+                pass
             
             # Create File menu
             file_menu = tk.Menu(menubar, tearoff=0)
