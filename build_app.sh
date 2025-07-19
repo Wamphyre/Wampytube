@@ -42,12 +42,12 @@ echo "Testing Python dependencies..."
 PYTHON_CMD=$(which python3)
 echo "Using Python: $PYTHON_CMD"
 
-if ! $PYTHON_CMD -c "import tkinter, pytubefix, requests, psutil" 2>/dev/null; then
+if ! $PYTHON_CMD -c "import tkinter, pytubefix, requests, psutil, customtkinter" 2>/dev/null; then
     echo -e "${YELLOW}Missing dependencies. Installing...${NC}"
     pip3 install -r requirements.txt
     
     # Test again
-    if ! $PYTHON_CMD -c "import tkinter, pytubefix, requests, psutil" 2>/dev/null; then
+    if ! $PYTHON_CMD -c "import tkinter, pytubefix, requests, psutil, customtkinter" 2>/dev/null; then
         echo -e "${RED}Failed to install dependencies!${NC}"
         exit 1
     fi
@@ -154,7 +154,7 @@ int main(int argc, char* argv[]) {
     char* python_exe = find_python_with_deps();
     if (!python_exe) {
         // Show error dialog using osascript
-        system("osascript -e 'display dialog \"Python 3 with required dependencies not found!\\n\\nPlease install:\\npip3 install pytubefix requests psutil\\n\\nOr download Python from python.org\" with title \"WampyTube Error\" buttons {\"OK\"} with icon stop'");
+        system("osascript -e 'display dialog \"Python 3 with required dependencies not found!\\n\\nPlease install:\\npip3 install pytubefix requests psutil customtkinter\\n\\nOr download Python from python.org\" with title \"WampyTube Error\" buttons {\"OK\"} with icon stop'");
         free(bundle_path);
         return 1;
     }
@@ -173,8 +173,15 @@ int main(int argc, char* argv[]) {
     snprintf(new_path, sizeof(new_path), "%s:%s", bundle_path, current_path ? current_path : "");
     setenv("PATH", new_path, 1);
     
-    // Execute Python script
-    execl(python_exe, python_exe, main_script, (char*)NULL);
+    // Set process name environment variable for Python to pick up
+    setenv("PYTHONEXECUTABLE", "WampyTube", 1);
+    setenv("WAMPYTUBE_APP", "1", 1);
+    
+    // Create command array for execv
+    char* args[] = {"WampyTube", main_script, NULL};
+    
+    // Execute Python script with custom process name using execv
+    execv(python_exe, args);
     
     // If we get here, exec failed
     fprintf(stderr, "Error: Failed to execute Python script\n");
@@ -223,8 +230,55 @@ echo "Creating app bundle..."
 rm -rf dist
 mkdir -p dist/WampyTube.app/Contents/{MacOS,Resources}
 
-# Copy the native launcher as the main executable
-cp wampytube_launcher dist/WampyTube.app/Contents/MacOS/WampyTube
+# Create shell script launcher that sets process name
+cat > dist/WampyTube.app/Contents/MacOS/WampyTube << 'LAUNCHER_EOF'
+#!/bin/bash
+
+# Get the directory of this script (the MacOS folder)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RESOURCES_DIR="$SCRIPT_DIR/../Resources"
+
+# Find Python with dependencies
+find_python() {
+    local candidates=(
+        "/opt/homebrew/bin/python3"
+        "/usr/local/bin/python3"
+        "/usr/bin/python3"
+        "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"
+        "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3"
+        "/Library/Frameworks/Python.framework/Versions/3.10/bin/python3"
+        "/Library/Frameworks/Python.framework/Versions/3.9/bin/python3"
+    )
+    
+    for python_exe in "${candidates[@]}"; do
+        if [[ -x "$python_exe" ]] && "$python_exe" -c "import tkinter, pytubefix, requests, psutil, customtkinter" 2>/dev/null; then
+            echo "$python_exe"
+            return 0
+        fi
+    done
+    
+    return 1
+}
+
+# Find suitable Python
+PYTHON_EXE=$(find_python)
+if [[ -z "$PYTHON_EXE" ]]; then
+    osascript -e 'display dialog "Python 3 with required dependencies not found!\n\nPlease install:\npip3 install pytubefix requests psutil customtkinter\n\nOr download Python from python.org" with title "WampyTube Error" buttons {"OK"} with icon stop'
+    exit 1
+fi
+
+# Set environment variables
+export PATH="$RESOURCES_DIR:$PATH"
+export WAMPYTUBE_APP=1
+
+# Change to resources directory
+cd "$RESOURCES_DIR"
+
+# Execute Python with exec to replace the shell process completely
+# This ensures the process name shows as WampyTube instead of Python
+exec -a "WampyTube" "$PYTHON_EXE" "$RESOURCES_DIR/wampytube.py"
+LAUNCHER_EOF
+
 chmod +x dist/WampyTube.app/Contents/MacOS/WampyTube
 
 # Copy resources
@@ -250,9 +304,9 @@ cat > dist/WampyTube.app/Contents/Info.plist << 'EOF'
     <key>CFBundleDisplayName</key>
     <string>WampyTube</string>
     <key>CFBundleVersion</key>
-    <string>1.0.0</string>
+    <string>1.1.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>1.1.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleSignature</key>
@@ -274,6 +328,9 @@ if [ -f "icon.icns" ]; then
     echo "    <key>CFBundleIconFile</key>" >> dist/WampyTube.app/Contents/Info.plist
     echo "    <string>icon</string>" >> dist/WampyTube.app/Contents/Info.plist
     cp icon.icns dist/WampyTube.app/Contents/Resources/icon.icns
+elif [ -f "icon.png" ]; then
+    echo "    <key>CFBundleIconFile</key>" >> dist/WampyTube.app/Contents/Info.plist
+    echo "    <string>icon.png</string>" >> dist/WampyTube.app/Contents/Info.plist
 fi
 
 # Close Info.plist

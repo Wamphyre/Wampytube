@@ -1,5 +1,6 @@
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+#!/usr/bin/env python3
+
+import customtkinter as ctk
 from pytubefix import YouTube
 import requests
 import threading
@@ -13,31 +14,32 @@ import time
 from functools import lru_cache
 import psutil
 import sys
+from tkinter import filedialog
+from PIL import Image
+import tkinter as tk
 
-# Global cache configuration for HTTP responses
-SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"})
+# Configure CustomTkinter
+ctk.set_appearance_mode("dark")  # Modes: "System" (standard), "Dark", "Light"
+ctk.set_default_color_theme("blue")  # Themes: "blue" (standard), "green", "dark-blue"
 
-# Logging configuration
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("WampyTube")
-# Remove all existing handlers to avoid duplication
 logger.handlers = []
 logger.propagate = False
 
-# System resources configuration - Auto-detect cores/threads
+# System resources configuration
 SYSTEM_CORES = psutil.cpu_count(logical=False) or 4
 SYSTEM_THREADS = psutil.cpu_count(logical=True) or 8
 DOWNLOAD_THREADS = min(4, SYSTEM_THREADS // 2)
-CPU_THREADS = SYSTEM_THREADS - 1  # Leave one thread for system operations
+CPU_THREADS = SYSTEM_THREADS - 1
 
-# FFmpeg configuration - Use ffmpeg from the same directory as the script
+# FFmpeg configuration
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FFMPEG_PATH = os.path.join(SCRIPT_DIR, 'ffmpeg')
 
 # Check if our local ffmpeg exists
 if not os.path.exists(FFMPEG_PATH):
-    # Fallback to system ffmpeg if local not found
     FFMPEG_PATH = 'ffmpeg'
     logger.warning(f"Local ffmpeg not found in {SCRIPT_DIR}, using system ffmpeg")
 else:
@@ -47,7 +49,6 @@ else:
 def check_macos_gpu():
     """Check for GPU and VideoToolbox support on macOS"""
     try:
-        # Check system profiler for GPU information
         result = subprocess.run(['system_profiler', 'SPDisplaysDataType'], 
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         
@@ -56,7 +57,6 @@ def check_macos_gpu():
         if result.returncode == 0:
             output = result.stdout
             
-            # Look for GPU models
             if 'AMD' in output or 'Radeon' in output:
                 if 'RX 6600' in output:
                     gpu_info['model'] = 'AMD RX 6600'
@@ -78,16 +78,11 @@ def check_macos_gpu():
                 else:
                     gpu_info['model'] = 'Apple Silicon'
                 gpu_info['available'] = True
-                gpu_info['hevc_encoding'] = True  # Apple Silicon has excellent HEVC support
-        
-        # Check if VideoToolbox is available (should be on all modern macOS)
-        try:
-            # VideoToolbox is available on macOS 10.8+, so we assume it's available
-            gpu_info['videotoolbox'] = True
-            if gpu_info['available']:
                 gpu_info['hevc_encoding'] = True
-        except Exception as e:
-            logger.warning(f"Error checking VideoToolbox: {e}")
+        
+        gpu_info['videotoolbox'] = True
+        if gpu_info['available']:
+            gpu_info['hevc_encoding'] = True
         
         return gpu_info
         
@@ -95,7 +90,7 @@ def check_macos_gpu():
         logger.error(f"Error checking macOS GPU: {e}")
         return {'model': 'Unknown', 'available': False, 'hevc_encoding': False, 'videotoolbox': False}
 
-# Get hardware acceleration information for macOS
+# Get hardware acceleration information
 MACOS_GPU = check_macos_gpu()
 logger.info(f"Detected GPU: {MACOS_GPU}")
 
@@ -103,90 +98,623 @@ logger.info(f"Detected GPU: {MACOS_GPU}")
 def check_ffmpeg():
     """Check FFmpeg version and available encoders"""
     try:
-        # Check FFmpeg version
         version_result = subprocess.run([FFMPEG_PATH, '-version'], 
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         
         if version_result.returncode != 0:
             return {'available': False}
         
-        # Extract version
         version_match = re.search(r'ffmpeg version ([^ ]+)', version_result.stdout)
         version = version_match.group(1) if version_match else "Unknown"
         
-        # Check encoders
-        encoders_result = subprocess.run([FFMPEG_PATH, '-encoders'], 
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        
-        encoders = {
-            'hevc_videotoolbox': 'hevc_videotoolbox' in encoders_result.stdout,
-            'h264_videotoolbox': 'h264_videotoolbox' in encoders_result.stdout,
-            'libx265': 'libx265' in encoders_result.stdout,
-            'libx264': 'libx264' in encoders_result.stdout,
-        }
-        
         return {
             'available': True,
-            'version': version,
-            'encoders': encoders
+            'version': version
         }
     except Exception as e:
         logger.error(f"Error checking FFmpeg: {e}")
         return {'available': False}
 
-# Check FFmpeg capabilities
 FFMPEG_INFO = check_ffmpeg()
 logger.info(f"FFmpeg information: {FFMPEG_INFO}")
 
-# Ensure FFmpeg is available
-if not FFMPEG_INFO.get('available', False):
-    logger.error("FFmpeg is not installed or not in PATH. Please install FFmpeg.")
-    messagebox = __import__('tkinter.messagebox').messagebox
-    messagebox.showerror("Error", "FFmpeg is not installed. Please install FFmpeg.")
-    exit(1)
+# Global variables for progress tracking
+current_download = {
+    'status': 'idle',
+    'progress': 0,
+    'message': '',
+    'speed': '',
+    'eta': ''
+}
 
-def on_progress(stream, chunk, bytes_remaining):
-    """Callback to update the progress bar during download"""
-    size = stream.filesize
-    bytes_downloaded = size - bytes_remaining
-    percentage = (bytes_downloaded / size) * 100
-    # Using throttling to reduce excessive UI updates
-    current_time = time.time()
-    if not hasattr(on_progress, "last_update") or current_time - on_progress.last_update > 0.1:
-        root.after(0, update_progress_bar, percentage)
-        on_progress.last_update = current_time
-
-def update_progress_bar(percentage):
-    """Updates the progress bar in the interface"""
-    progress_bar['value'] = percentage
-    progress_label.config(text=f"Downloading: {percentage:.1f}%")
-    # Only log every 10% to avoid spam
-    if int(percentage) % 10 == 0:
-        log_message(f"Download progress: {percentage:.1f}%")
-
-@lru_cache(maxsize=64)
-def get_youtube_object(url):
-    """Gets and caches the YouTube object to avoid repeated requests"""
-    yt = YouTube(url, on_progress_callback=on_progress, use_oauth=False, allow_oauth_cache=True)
-    yt.check_availability()
-    return yt
-
-def get_best_streams(url):
-    """Gets the best available streams for the video"""
-    try:
-        yt = get_youtube_object(url)
+class WampyTubeApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
         
-        # Try to get the best available quality in progressive format
+        # Set application name for macOS menu bar (must be done early)
+        self.set_app_name()
+        
+        # Configure window
+        self.title("WampyTube")
+        self.geometry("800x700")
+        self.minsize(700, 600)
+        
+        # Set icon if available
+        self.set_app_icon()
+        
+        # Create custom menu bar
+        self.create_menu_bar()
+        
+        # Create widgets
+        self.create_widgets()
+        
+        # Detect system theme
+        self.detect_system_theme()
+        
+    def create_menu_bar(self):
+        """Create custom menu bar with About dialog"""
+        try:
+            # Create menu bar
+            menubar = tk.Menu(self)
+            self.config(menu=menubar)
+            
+            # Create WampyTube menu (main app menu)
+            app_menu = tk.Menu(menubar, tearoff=0)
+            menubar.add_cascade(label="WampyTube", menu=app_menu)
+            
+            # Add About menu item
+            app_menu.add_command(label="About WampyTube", command=self.show_about_dialog)
+            app_menu.add_separator()
+            app_menu.add_command(label="Quit WampyTube", command=self.quit_app, accelerator="Cmd+Q")
+            
+            # Create File menu
+            file_menu = tk.Menu(menubar, tearoff=0)
+            menubar.add_cascade(label="File", menu=file_menu)
+            file_menu.add_command(label="Select Output Folder...", command=self.select_output_folder, accelerator="Cmd+O")
+            file_menu.add_separator()
+            file_menu.add_command(label="Clear Log", command=self.clear_log)
+            
+            # Create Edit menu
+            edit_menu = tk.Menu(menubar, tearoff=0)
+            menubar.add_cascade(label="Edit", menu=edit_menu)
+            edit_menu.add_command(label="Paste URL", command=self.paste_from_clipboard, accelerator="Cmd+V")
+            edit_menu.add_command(label="Clear URL", command=self.clear_url)
+            
+            # Bind keyboard shortcuts
+            self.bind_all("<Command-q>", lambda e: self.quit_app())
+            self.bind_all("<Command-o>", lambda e: self.select_output_folder())
+            self.bind_all("<Command-v>", lambda e: self.paste_from_clipboard())
+            
+            logger.info("Custom menu bar created successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to create menu bar: {e}")
+    
+    def show_about_dialog(self):
+        """Show About WampyTube dialog with custom icon"""
+        try:
+            # Create about window
+            about_window = ctk.CTkToplevel(self)
+            about_window.title("About WampyTube")
+            about_window.geometry("450x520")
+            about_window.resizable(False, False)
+            
+            # Center the window
+            about_window.transient(self)
+            about_window.grab_set()
+            
+            # Main container
+            main_frame = ctk.CTkFrame(about_window, fg_color="transparent")
+            main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+            
+            # Icon section
+            icon_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+            icon_frame.pack(pady=(0, 10))
+            
+            # Load and display icon
+            try:
+                icon_path = os.path.join(SCRIPT_DIR, 'icon.png')
+                if os.path.exists(icon_path):
+                    # Load icon with PIL and resize
+                    pil_image = Image.open(icon_path)
+                    pil_image = pil_image.resize((80, 80), Image.Resampling.LANCZOS)
+                    
+                    # Convert to CTkImage
+                    icon_image = ctk.CTkImage(light_image=pil_image, dark_image=pil_image, size=(80, 80))
+                    
+                    # Display icon
+                    icon_label = ctk.CTkLabel(icon_frame, image=icon_image, text="")
+                    icon_label.pack()
+                else:
+                    # Fallback text if no icon
+                    icon_label = ctk.CTkLabel(icon_frame, text="🎬", font=ctk.CTkFont(size=40))
+                    icon_label.pack()
+            except Exception as e:
+                logger.warning(f"Could not load icon for about dialog: {e}")
+                # Fallback emoji
+                icon_label = ctk.CTkLabel(icon_frame, text="🎬", font=ctk.CTkFont(size=40))
+                icon_label.pack()
+            
+            # App name and version
+            name_label = ctk.CTkLabel(main_frame, text="WampyTube", 
+                                    font=ctk.CTkFont(size=22, weight="bold"))
+            name_label.pack(pady=(0, 3))
+            
+            version_label = ctk.CTkLabel(main_frame, text="Version 1.1.0", 
+                                       font=ctk.CTkFont(size=13))
+            version_label.pack(pady=(0, 12))
+            
+            # Description
+            desc_label = ctk.CTkLabel(main_frame, 
+                                    text="Modern YouTube downloader with\nhardware acceleration for macOS", 
+                                    font=ctk.CTkFont(size=12),
+                                    justify="center")
+            desc_label.pack(pady=(0, 12))
+            
+            # Features section
+            features_frame = ctk.CTkFrame(main_frame)
+            features_frame.pack(fill="x", pady=(0, 12))
+            
+            features_title = ctk.CTkLabel(features_frame, text="Key Features", 
+                                        font=ctk.CTkFont(size=14, weight="bold"))
+            features_title.pack(pady=(12, 8))
+            
+            features_text = """• 4K video downloads with HEVC encoding
+• GPU acceleration (Apple Silicon, AMD, Intel)
+• Real-time progress monitoring
+• Native macOS interface"""
+            
+            features_label = ctk.CTkLabel(features_frame, text=features_text,
+                                        font=ctk.CTkFont(size=11),
+                                        justify="left",
+                                        anchor="w")
+            features_label.pack(fill="x", padx=15, pady=(0, 12))
+            
+            # System info section
+            system_frame = ctk.CTkFrame(main_frame)
+            system_frame.pack(fill="x", pady=(0, 15))
+            
+            system_title = ctk.CTkLabel(system_frame, text="System Info", 
+                                      font=ctk.CTkFont(size=14, weight="bold"))
+            system_title.pack(pady=(12, 8))
+            
+            # Truncate long GPU names
+            gpu_name = MACOS_GPU['model']
+            if len(gpu_name) > 25:
+                gpu_name = gpu_name[:22] + "..."
+            
+            ffmpeg_version = FFMPEG_INFO.get('version', 'Not found')
+            if len(ffmpeg_version) > 25:
+                ffmpeg_version = ffmpeg_version[:22] + "..."
+            
+            system_text = f"""GPU: {gpu_name}
+CPU: {SYSTEM_CORES} cores, {SYSTEM_THREADS} threads
+FFmpeg: {ffmpeg_version}"""
+            
+            system_label = ctk.CTkLabel(system_frame, text=system_text,
+                                      font=ctk.CTkFont(family="SF Mono", size=10),
+                                      justify="left",
+                                      anchor="w")
+            system_label.pack(fill="x", padx=15, pady=(0, 12))
+            
+            # Copyright and close button
+            copyright_label = ctk.CTkLabel(main_frame, text="© 2024 WampyTube", 
+                                         font=ctk.CTkFont(size=11))
+            copyright_label.pack(pady=(0, 12))
+            
+            # Close button
+            close_button = ctk.CTkButton(main_frame, text="Close", width=80, height=32,
+                                       command=about_window.destroy)
+            close_button.pack()
+            
+            # Focus the about window
+            about_window.focus()
+            
+        except Exception as e:
+            logger.error(f"Failed to show about dialog: {e}")
+    
+    def quit_app(self):
+        """Quit the application"""
+        try:
+            self.quit()
+            self.destroy()
+        except:
+            pass
+    
+    def clear_log(self):
+        """Clear the activity log"""
+        try:
+            self.log_text.delete("1.0", "end")
+            self.log_message("Activity log cleared", "info")
+        except Exception as e:
+            logger.error(f"Failed to clear log: {e}")
+    
+    def clear_url(self):
+        """Clear the URL entry field"""
+        try:
+            self.url_entry.delete(0, "end")
+            # Hide video info frame if visible
+            self.video_info_frame.pack_forget()
+        except Exception as e:
+            logger.error(f"Failed to clear URL: {e}")
+    
+    def set_app_name(self):
+        """Set application name for macOS menu bar"""
+        try:
+            # Method 1: Set process name using ctypes (most effective)
+            try:
+                import ctypes
+                import ctypes.util
+                
+                # Load the Foundation framework
+                foundation = ctypes.cdll.LoadLibrary(ctypes.util.find_library("Foundation"))
+                
+                # Get the current process
+                objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+                
+                # Set up function signatures
+                objc.objc_getClass.restype = ctypes.c_void_p
+                objc.objc_getClass.argtypes = [ctypes.c_char_p]
+                objc.sel_registerName.restype = ctypes.c_void_p
+                objc.sel_registerName.argtypes = [ctypes.c_char_p]
+                objc.objc_msgSend.restype = ctypes.c_void_p
+                objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+                
+                # Get NSProcessInfo class
+                NSProcessInfo = objc.objc_getClass(b"NSProcessInfo")
+                processInfo = objc.objc_msgSend(NSProcessInfo, objc.sel_registerName(b"processInfo"))
+                
+                # Set process name
+                objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+                NSString = objc.objc_getClass(b"NSString")
+                app_name = objc.objc_msgSend(NSString, objc.sel_registerName(b"stringWithUTF8String:"), b"WampyTube")
+                objc.objc_msgSend(processInfo, objc.sel_registerName(b"setProcessName:"), app_name)
+                
+                logger.info("Application name set to 'WampyTube' using ctypes method")
+                
+            except Exception as e1:
+                logger.warning(f"ctypes method failed: {e1}, trying PyObjC method")
+                
+                # Method 2: Try PyObjC if available
+                try:
+                    from Foundation import NSProcessInfo
+                    NSProcessInfo.processInfo().setProcessName_("WampyTube")
+                    logger.info("Application name set to 'WampyTube' using PyObjC method")
+                    
+                except ImportError:
+                    logger.warning("PyObjC not available, trying subprocess method")
+                    
+                    # Method 3: Use subprocess to set process name
+                    try:
+                        subprocess.run(['exec', '-a', 'WampyTube'] + sys.argv, check=False)
+                        logger.info("Attempted to set process name using subprocess")
+                    except Exception as e3:
+                        logger.warning(f"subprocess method failed: {e3}")
+                        
+                        # Method 4: Set sys.argv[0] as fallback
+                        original_argv0 = sys.argv[0]
+                        sys.argv[0] = "WampyTube"
+                        logger.info("Set sys.argv[0] to 'WampyTube' as fallback")
+                        
+        except Exception as e:
+            logger.error(f"Failed to set application name: {e}")
+    
+    def set_app_icon(self):
+        """Set application icon for macOS dock"""
+        try:
+            icon_path = os.path.join(SCRIPT_DIR, 'icon.png')
+            if os.path.exists(icon_path):
+                # Create PhotoImage from PNG file
+                photo = tk.PhotoImage(file=icon_path)
+                
+                # Set icon using wm_iconphoto (works with customtkinter)
+                self.wm_iconphoto(True, photo)
+                
+                # Store reference to prevent garbage collection
+                self._icon_photo = photo
+                
+                logger.info("Application icon set successfully")
+            else:
+                logger.warning(f"Icon file not found at {icon_path}")
+                
+        except Exception as e:
+            logger.error(f"Failed to set application icon: {e}")
+            # Try alternative method for macOS
+            try:
+                icon_path = os.path.join(SCRIPT_DIR, 'icon.png')
+                if os.path.exists(icon_path):
+                    # Direct tk call method
+                    photo = tk.PhotoImage(file=icon_path)
+                    self.tk.call('wm', 'iconphoto', self._w, photo)
+                    self._icon_photo = photo
+                    logger.info("Icon set using tk.call fallback method")
+            except Exception as fallback_error:
+                logger.error(f"Fallback icon method also failed: {fallback_error}")
+    
+    def detect_system_theme(self):
+        """Detect if macOS is using dark mode"""
+        try:
+            result = subprocess.run(['defaults', 'read', '-g', 'AppleInterfaceStyle'], 
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if result.returncode == 0:
+                ctk.set_appearance_mode("dark")
+            else:
+                ctk.set_appearance_mode("light")
+        except:
+            ctk.set_appearance_mode("dark")
+    
+    def create_widgets(self):
+        # Main container with padding
+        main_container = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
+        main_container.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # URL Input Section
+        url_frame = ctk.CTkFrame(main_container)
+        url_frame.pack(fill="x", pady=(0, 15))
+        
+        url_label = ctk.CTkLabel(url_frame, text="YouTube URL", font=ctk.CTkFont(size=14, weight="bold"))
+        url_label.pack(anchor="w", padx=15, pady=(15, 5))
+        
+        url_input_frame = ctk.CTkFrame(url_frame, fg_color="transparent")
+        url_input_frame.pack(fill="x", padx=15, pady=(0, 15))
+        
+        self.url_entry = ctk.CTkEntry(url_input_frame, placeholder_text="https://youtube.com/watch?v=...", height=40)
+        self.url_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        
+        paste_button = ctk.CTkButton(url_input_frame, text="Paste", width=80, height=40, command=self.paste_from_clipboard)
+        paste_button.pack(side="right")
+        
+        # Video Info Section (hidden initially)
+        self.video_info_frame = ctk.CTkFrame(main_container)
+        # Don't pack it initially
+        
+        self.video_title_label = ctk.CTkLabel(self.video_info_frame, text="", font=ctk.CTkFont(size=16, weight="bold"))
+        self.video_title_label.pack(anchor="w", padx=15, pady=(15, 5))
+        
+        info_details_frame = ctk.CTkFrame(self.video_info_frame, fg_color="transparent")
+        info_details_frame.pack(fill="x", padx=15, pady=(0, 15))
+        
+        self.video_res_label = ctk.CTkLabel(info_details_frame, text="", font=ctk.CTkFont(size=13))
+        self.video_res_label.pack(side="left", padx=(0, 20))
+        
+        self.video_duration_label = ctk.CTkLabel(info_details_frame, text="", font=ctk.CTkFont(size=13))
+        self.video_duration_label.pack(side="left")
+        
+        # Output Folder Section
+        folder_frame = ctk.CTkFrame(main_container)
+        folder_frame.pack(fill="x", pady=(0, 15))
+        
+        folder_label = ctk.CTkLabel(folder_frame, text="Output Folder", font=ctk.CTkFont(size=14, weight="bold"))
+        folder_label.pack(anchor="w", padx=15, pady=(15, 5))
+        
+        folder_input_frame = ctk.CTkFrame(folder_frame, fg_color="transparent")
+        folder_input_frame.pack(fill="x", padx=15, pady=(0, 15))
+        
+        self.output_entry = ctk.CTkEntry(folder_input_frame, placeholder_text="/path/to/folder", height=40)
+        self.output_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        self.output_entry.insert(0, os.path.expanduser("~/Downloads"))
+        
+        browse_button = ctk.CTkButton(folder_input_frame, text="Browse", width=80, height=40, command=self.select_output_folder)
+        browse_button.pack(side="right")
+        
+        # Download Button and Progress Section
+        progress_frame = ctk.CTkFrame(main_container)
+        progress_frame.pack(fill="x", pady=(0, 15))
+        
+        button_frame = ctk.CTkFrame(progress_frame, fg_color="transparent")
+        button_frame.pack(fill="x", padx=15, pady=15)
+        
+        self.download_button = ctk.CTkButton(button_frame, text="Download Video", height=45, 
+                                           font=ctk.CTkFont(size=16, weight="bold"),
+                                           command=self.download_video)
+        self.download_button.pack(side="left")
+        
+        self.status_label = ctk.CTkLabel(button_frame, text="Ready to download", font=ctk.CTkFont(size=13))
+        self.status_label.pack(side="right", padx=(20, 0))
+        
+        # Progress bar
+        self.progress_bar = ctk.CTkProgressBar(progress_frame, height=20)
+        self.progress_bar.pack(fill="x", padx=15, pady=(0, 5))
+        self.progress_bar.set(0)
+        
+        self.progress_label = ctk.CTkLabel(progress_frame, text="", font=ctk.CTkFont(size=12))
+        self.progress_label.pack(padx=15, pady=(0, 15))
+        
+        # Activity Log Section
+        log_frame = ctk.CTkFrame(main_container)
+        log_frame.pack(fill="both", expand=True)
+        
+        log_label = ctk.CTkLabel(log_frame, text="Activity Log", font=ctk.CTkFont(size=14, weight="bold"))
+        log_label.pack(anchor="w", padx=15, pady=(15, 5))
+        
+        # Create text widget for log
+        log_container = ctk.CTkFrame(log_frame)
+        log_container.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+        
+        self.log_text = ctk.CTkTextbox(log_container, font=ctk.CTkFont(family="SF Mono", size=12))
+        self.log_text.pack(fill="both", expand=True)
+        
+        # Initial log messages
+        self.log_message("WampyTube initialized successfully", "success")
+        self.log_message(f"System: {MACOS_GPU['model']} • {SYSTEM_CORES} cores, {SYSTEM_THREADS} threads")
+        self.log_message(f"FFmpeg: {FFMPEG_INFO.get('version', 'Not found')}")
+    
+    def log_message(self, message, level="info"):
+        """Add message to activity log"""
+        timestamp = time.strftime("%H:%M:%S")
+        
+        # Color coding based on level
+        icon = {
+            "info": "🔵",
+            "success": "🟢",
+            "warning": "🟡", 
+            "error": "🔴"
+        }.get(level, "⚪")
+        
+        formatted_message = f"[{timestamp}] {icon} {message}\n"
+        
+        # Add to text widget
+        self.log_text.insert("end", formatted_message)
+        self.log_text.see("end")
+        
+        # Also log to console
+        logger.info(f"{icon} {message}")
+    
+    def paste_from_clipboard(self):
+        """Paste clipboard content into URL field"""
+        try:
+            clipboard_text = self.clipboard_get()
+            if clipboard_text:
+                self.url_entry.delete(0, "end")
+                self.url_entry.insert(0, clipboard_text)
+                # Auto-analyze if it's a YouTube URL
+                if "youtube.com" in clipboard_text or "youtu.be" in clipboard_text:
+                    self.analyze_url()
+        except:
+            pass
+    
+    def select_output_folder(self):
+        """Open dialog to select output folder"""
+        folder_selected = filedialog.askdirectory()
+        if folder_selected:
+            self.output_entry.delete(0, "end")
+            self.output_entry.insert(0, folder_selected)
+    
+    def analyze_url(self):
+        """Analyze YouTube URL and show video info"""
+        url = self.url_entry.get().strip()
+        if not url:
+            return
+        
+        try:
+            yt = YouTube(url, use_oauth=False, allow_oauth_cache=True)
+            yt.check_availability()
+            
+            # Get best stream info
+            video_stream = yt.streams.get_highest_resolution()
+            
+            # Update video info display
+            self.video_title_label.configure(text=yt.title[:60] + "..." if len(yt.title) > 60 else yt.title)
+            self.video_res_label.configure(text=f"🎬 {video_stream.resolution}")
+            self.video_duration_label.configure(text=f"⏱️ {self.format_duration(yt.length)}")
+            
+            # Show video info frame
+            self.video_info_frame.pack(fill="x", pady=(0, 15), after=self.children['!ctkframe'].children['!ctkframe'])
+            
+            self.log_message(f"Analyzed: {yt.title}", "success")
+        except Exception as e:
+            self.log_message(f"Failed to analyze URL: {str(e)}", "error")
+    
+    def format_duration(self, seconds):
+        """Format duration in seconds to readable string"""
+        if not seconds:
+            return "Unknown"
+        
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        secs = seconds % 60
+        
+        if hours > 0:
+            return f"{hours}h {minutes}m {secs}s"
+        elif minutes > 0:
+            return f"{minutes}m {secs}s"
+        else:
+            return f"{secs}s"
+    
+    def update_progress(self, percentage, message=""):
+        """Update progress bar and label"""
+        self.progress_bar.set(percentage / 100)
+        self.progress_label.configure(text=message)
+        if percentage % 10 == 0:  # Log every 10%
+            self.log_message(f"Progress: {percentage:.0f}% - {message}")
+    
+    def download_video(self):
+        """Start video download in separate thread"""
+        url = self.url_entry.get().strip()
+        output_folder = self.output_entry.get().strip()
+        
+        if not url:
+            self.log_message("Please enter a valid URL", "error")
+            return
+        if not output_folder:
+            self.log_message("Please select an output folder", "error")
+            return
+        
+        # Disable download button
+        self.download_button.configure(state="disabled")
+        self.status_label.configure(text="Downloading...")
+        
+        # Start download in thread
+        thread = threading.Thread(target=self.download_in_thread, args=(url, output_folder))
+        thread.daemon = True
+        thread.start()
+    
+    def download_in_thread(self, url, output_folder):
+        """Handle the download in a separate thread"""
+        try:
+            self.log_message("Starting download process...")
+            
+            # Create output directory if needed
+            os.makedirs(output_folder, exist_ok=True)
+            
+            # Get YouTube object
+            yt = YouTube(url, on_progress_callback=self.on_download_progress, use_oauth=False, allow_oauth_cache=True)
+            yt.check_availability()
+            
+            # Get best streams
+            self.log_message("Analyzing video streams...")
+            video_stream, audio_stream, needs_merge = self.get_best_streams(yt)
+            
+            if not video_stream:
+                raise Exception("No suitable stream found")
+            
+            resolution = video_stream.resolution
+            self.log_message(f"Best quality found: {resolution}")
+            
+            if needs_merge:
+                # Download video and audio separately
+                self.after(0, lambda: self.status_label.configure(text=f"Downloading video ({resolution})..."))
+                video_path = video_stream.download(output_folder, filename_prefix="video_")
+                
+                self.after(0, lambda: self.status_label.configure(text="Downloading audio..."))
+                audio_path = audio_stream.download(output_folder, filename_prefix="audio_")
+                
+                # Merge with ffmpeg
+                self.after(0, lambda: self.status_label.configure(text="Encoding with VideoToolbox..."))
+                final_path = Path(video_path).parent / f"{Path(video_path).stem.replace('video_', '')}_HEVC.mp4"
+                
+                success = self.merge_audio_video(video_path, audio_path, str(final_path))
+                
+                if success:
+                    # Clean up temp files
+                    os.remove(video_path)
+                    os.remove(audio_path)
+                    self.log_message(f"Download complete! Saved to: {final_path.name}", "success")
+                else:
+                    raise Exception("Failed to merge audio and video")
+            else:
+                # Direct download
+                final_path = video_stream.download(output_folder)
+                self.log_message(f"Download complete! Saved to: {Path(final_path).name}", "success")
+            
+            # Update UI
+            self.after(0, lambda: self.download_complete())
+            
+        except Exception as e:
+            self.log_message(f"Download failed: {str(e)}", "error")
+            self.after(0, lambda: self.download_failed())
+    
+    def get_best_streams(self, yt):
+        """Get the best available streams"""
         streams = yt.streams.filter(progressive=True, file_extension="mp4").order_by("resolution").desc()
         
         if not streams:
-            logger.info("No progressive streams found")
             return None, None, False
             
         best_progressive = streams.first()
         progressive_resolution = int(best_progressive.resolution[:-1]) if best_progressive else 0
         
-        # If the best progressive resolution is less than 1080p, look for adaptive streams
+        # If best progressive is less than 1080p, try adaptive
         if progressive_resolution < 1080:
             video_stream = yt.streams.filter(adaptive=True, file_extension="mp4", only_video=True)\
                                 .order_by("resolution").desc().first()
@@ -197,912 +725,120 @@ def get_best_streams(url):
                 return video_stream, audio_stream, True
         
         return best_progressive, None, False
-    except Exception as e:
-        logger.error(f"Error getting streams: {str(e)}")
-        raise
-
-def set_process_priority():
-    """Set the process priority to maximum for faster performance on macOS"""
-    try:
-        # macOS priority adjustment - only if running as root
-        if os.geteuid() == 0:
-            os.nice(-10)
-        else:
-            # For normal users, use a smaller value
-            os.nice(-5)
-    except Exception as e:
-        # This is expected for normal users, don't log as warning
-        logger.debug(f"Process priority adjustment skipped: {str(e)}")
-
-def optimize_system_resources():
-    """Optimize system resources for maximum processing speed on macOS"""
-    try:
-        # On macOS, we have more limited options for process optimization
+    
+    def on_download_progress(self, stream, chunk, bytes_remaining):
+        """Progress callback for download"""
+        total_size = stream.filesize
+        bytes_downloaded = total_size - bytes_remaining
+        percentage = (bytes_downloaded / total_size) * 100
+        
+        # Update progress in main thread
+        self.after(0, lambda: self.update_progress(percentage, f"Downloading: {percentage:.1f}%"))
+    
+    def merge_audio_video(self, video_path, audio_path, output_path):
+        """Merge audio and video using FFmpeg with VideoToolbox"""
         try:
-            # Try to increase nice value (more conservative on macOS)
-            os.nice(-5)  # Modest priority boost for macOS
+            command = [
+                FFMPEG_PATH,
+                '-y',
+                '-i', video_path,
+                '-i', audio_path,
+                '-c:v', 'hevc_videotoolbox',
+                '-b:v', '6M',
+                '-c:a', 'aac',
+                '-b:a', '192k',
+                output_path
+            ]
+            
+            result = subprocess.run(command, capture_output=True, text=True)
+            return result.returncode == 0
+            
         except Exception as e:
-            logger.debug(f"Could not set process priority: {e}")
-            
-        # macOS doesn't have ionice, but we can try to optimize other aspects
+            logger.error(f"Error merging: {str(e)}")
+            return False
+    
+    def download_complete(self):
+        """Reset UI after successful download"""
+        self.download_button.configure(state="normal")
+        self.status_label.configure(text="Download complete!")
+        self.progress_bar.set(1.0)
+        self.progress_label.configure(text="100% - Complete")
+    
+    def download_failed(self):
+        """Reset UI after failed download"""
+        self.download_button.configure(state="normal")
+        self.status_label.configure(text="Download failed")
+        self.progress_bar.set(0)
+        self.progress_label.configure(text="")
+
+def set_process_name():
+    """Set process name before creating the app to change menu bar name"""
+    try:
+        # Check if running from native app bundle
+        is_native_app = os.environ.get('WAMPYTUBE_APP') == '1'
+        
+        # Method 1: Set sys.argv[0] early
+        sys.argv[0] = "WampyTube"
+        
+        # Method 2: macOS specific - set process name using Foundation (most effective)
         try:
-            # Set environment variables for better performance
-            os.environ['MALLOC_ARENA_MAX'] = '4'  # Limit memory arenas
-        except Exception as e:
-            logger.debug(f"Could not set performance environment: {e}")
-    except Exception as e:
-        logger.warning(f"Could not optimize system resources: {str(e)}")
-
-def run_ffmpeg_command(command, progress_callback=None):
-    """
-    Run an FFmpeg command with frame rate information and progress monitoring.
-    
-    Args:
-        command (list): FFmpeg command as a list of arguments
-        progress_callback (callable): Optional callback for progress updates
-        
-    Returns:
-        bool: True if successful, False otherwise
-        dict: Information like average frame rate
-    """
-    stats = {'avg_fps': 0, 'total_frames': 0, 'duration': 0}
-    
-    try:
-        # Add global progress reporting
-        if progress_callback:
-            command.extend(['-progress', 'pipe:1'])
+            import objc
+            from Foundation import NSProcessInfo, NSBundle
             
-        # Print command for debugging
-        logger.debug(f"FFmpeg command: {' '.join(command)}")
+            # Set process name
+            NSProcessInfo.processInfo().setProcessName_("WampyTube")
             
-        # Launch FFmpeg process
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            bufsize=1
-        )
-        
-        # Variables for progress tracking
-        start_time = time.time()
-        duration_seconds = None
-        frame_count = 0
-        fps_stats = []
-        last_fps_time = start_time
-        last_progress_update = start_time
-        
-        # Process stdout for progress
-        if process.stdout:
-            for line in process.stdout:
-                # Parse progress information
-                if progress_callback:
-                    if line.startswith('out_time_ms='):
-                        try:
-                            time_ms = int(line.split('=')[1])
-                            current_time = time.time()
-                            # Update progress every 0.5 seconds
-                            if current_time - last_progress_update >= 0.5:
-                                if duration_seconds:
-                                    progress = min(100, (time_ms / 1000000) / duration_seconds * 100)
-                                    progress_callback(progress)
-                                    last_progress_update = current_time
-                        except (ValueError, ZeroDivisionError):
-                            pass
-                    elif line.startswith('duration='):
-                        try:
-                            duration_str = line.split('=')[1].strip()
-                            h, m, s = map(float, duration_str.split(':'))
-                            duration_seconds = h * 3600 + m * 60 + s
-                            stats['duration'] = duration_seconds
-                        except (ValueError, IndexError):
-                            pass
-                    elif line.startswith('frame='):
-                        try:
-                            frame_count = int(line.split('=')[1])
-                            stats['total_frames'] = frame_count
-                            
-                            # Calculate current FPS
-                            current_time = time.time()
-                            elapsed = current_time - start_time
-                            if elapsed > 0:
-                                current_fps = frame_count / elapsed
-                                fps_stats.append(current_fps)
-                                if len(fps_stats) > 10:  # Keep only last 10 FPS measurements
-                                    fps_stats.pop(0)
-                                avg_fps = sum(fps_stats) / len(fps_stats)
-                                stats['avg_fps'] = avg_fps
-                                
-                                # Update progress with FPS info every 0.5 seconds
-                                if current_time - last_fps_time >= 0.5:
-                                    if progress_callback and duration_seconds and avg_fps > 0:
-                                        # Estimate progress based on frames
-                                        estimated_total_frames = duration_seconds * 30  # Assume 30 fps average
-                                        progress = min(100, (frame_count / estimated_total_frames) * 100)
-                                        progress_callback(progress, f"Encoding at {avg_fps:.1f} FPS")
-                                    last_fps_time = current_time
-                        except (ValueError, ZeroDivisionError):
-                            pass
-        
-        # Wait for process to complete
-        process.wait()
-        
-        # Calculate final stats
-        if frame_count > 0:
-            elapsed = time.time() - start_time
-            if elapsed > 0:
-                stats['avg_fps'] = frame_count / elapsed
-        
-        # Check if successful
-        if process.returncode != 0:
-            stderr_output = process.stderr.read() if process.stderr else "No error output"
-            logger.error(f"FFmpeg failed with return code {process.returncode}")
-            logger.error(stderr_output)
-            return False, stats
-        
-        return True, stats
-    except Exception as e:
-        logger.error(f"Error running FFmpeg: {str(e)}")
-        return False, stats
-
-def merge_audio_video_with_videotoolbox(video_path, audio_path, output_path, progress_callback=None):
-    """Combine audio and video with macOS VideoToolbox hardware acceleration using HEVC (H.265)"""
-    if not MACOS_GPU['videotoolbox'] or not MACOS_GPU['hevc_encoding']:
-        logger.warning("HEVC encoding via VideoToolbox not available, falling back to CPU")
-        return False, {}
-    
-    try:
-        # Build FFmpeg command for macOS VideoToolbox HEVC encoding
-        command = [
-            FFMPEG_PATH,
-            '-y',  # Overwrite output files without asking
-            '-i', video_path,  # Video input
-            '-i', audio_path,  # Audio input
-            '-c:v', 'hevc_videotoolbox',  # HEVC via VideoToolbox
-            '-b:v', '6M',         # Bitrate (VideoToolbox doesn't support -q:v)
-            '-c:a', 'aac',            # Audio codec
-            '-b:a', '192k',           # Audio bitrate
-            '-max_muxing_queue_size', '1024',  # Prevent muxing errors
-            '-threads', str(CPU_THREADS),  # Use available CPU threads
-            output_path
-        ]
-        
-        # Run the command
-        logger.info("Starting encoding with macOS VideoToolbox HEVC...")
-        success, stats = run_ffmpeg_command(command, progress_callback)
-        
-        if success:
-            logger.info(f"Successfully processed with VideoToolbox HEVC. Average FPS: {stats.get('avg_fps', 0):.1f}")
-            return True, stats
-        else:
-            logger.error("VideoToolbox HEVC encoding failed")
-            return False, stats
+            # If running as native app, also set bundle info
+            if is_native_app:
+                bundle = NSBundle.mainBundle()
+                if bundle:
+                    info = bundle.infoDictionary()
+                    if info:
+                        info['CFBundleName'] = 'WampyTube'
+                        info['CFBundleDisplayName'] = 'WampyTube'
             
-    except Exception as e:
-        logger.error(f"Error with VideoToolbox HEVC encoding: {str(e)}")
-        return False, {}
-
-def merge_audio_video_with_cpu(video_path, audio_path, output_path, progress_callback=None):
-    """Fallback to CPU encoding with high quality HEVC"""
-    try:
-        # Build command for CPU-based HEVC encoding
-        command = [
-            FFMPEG_PATH,
-            '-y',
-            '-i', video_path,
-            '-i', audio_path,
-            '-c:v', 'libx265',  # CPU-based HEVC
-            '-preset', 'medium',  # Balance between speed and quality
-            '-x265-params', 'log-level=error',  # Reduce log spam
-            '-crf', '26',  # Constant Rate Factor (quality) - lower is better
-            '-c:a', 'aac',
-            '-b:a', '192k',
-            '-movflags', '+faststart',  # Optimize for streaming
-            '-threads', str(CPU_THREADS),
-            output_path
-        ]
-        
-        logger.info("Starting CPU HEVC encoding...")
-        success, stats = run_ffmpeg_command(command, progress_callback)
-        
-        if success:
-            logger.info(f"Successfully processed with CPU HEVC. Average FPS: {stats.get('avg_fps', 0):.1f}")
-            return True, stats
-        
-        # If HEVC failed, try H.264
-        logger.info("CPU HEVC encoding failed, trying H.264...")
-        command = [
-            FFMPEG_PATH,
-            '-y',
-            '-i', video_path,
-            '-i', audio_path,
-            '-c:v', 'libx264',  # CPU-based H.264
-            '-preset', 'medium',
-            '-crf', '18',  # H.264 needs a lower CRF for similar quality
-            '-profile:v', 'high',
-            '-level', '5.1',
-            '-c:a', 'aac',
-            '-b:a', '192k',
-            '-movflags', '+faststart',
-            '-threads', str(CPU_THREADS),
-            output_path
-        ]
-        
-        logger.info("Starting CPU H.264 encoding...")
-        success, stats = run_ffmpeg_command(command, progress_callback)
-        
-        if success:
-            logger.info(f"Successfully processed with CPU H.264. Average FPS: {stats.get('avg_fps', 0):.1f}")
-            return True, stats
-        
-        logger.error("All encoding methods failed")
-        return False, {}
-        
-    except Exception as e:
-        logger.error(f"Error in CPU encoding: {str(e)}")
-        return False, {}
-
-def merge_audio_video(video_path, audio_path, output_path, progress_callback=None):
-    """Main function to combine audio and video with macOS hardware acceleration"""
-    # Increase process priority
-    set_process_priority()
-    
-    # Try macOS VideoToolbox hardware acceleration with HEVC (H.265)
-    if MACOS_GPU['videotoolbox'] and MACOS_GPU['hevc_encoding']:
-        try:
-            success, stats = merge_audio_video_with_videotoolbox(video_path, audio_path, output_path, progress_callback)
-            if success:
-                return True, stats
-        except Exception as e:
-            logger.error(f"VideoToolbox HEVC encoding failed: {str(e)}")
-    
-    # If hardware encoding failed or not available, try CPU encoding
-    logger.info("Using CPU encoding fallback...")
-    return merge_audio_video_with_cpu(video_path, audio_path, output_path, progress_callback)
-
-def download_stream(stream, output_folder, prefix=""):
-    """Downloads a specific stream with optimized buffer sizes"""
-    try:
-        # Configure large buffer size for faster downloads
-        if hasattr(stream, '_monostate'):
-            if hasattr(stream._monostate, 'requests_session'):
-                stream._monostate.requests_session.chunk_size = 4 * 1024 * 1024  # 4MB chunks
-        
-        return stream.download(output_folder, filename_prefix=prefix)
-    except Exception as e:
-        logger.error(f"Error downloading stream: {str(e)}")
-        raise
-
-def update_encode_progress(percentage, status_text=None):
-    """Updates the progress bar for encoding progress"""
-    root.after(0, lambda: progress_bar.config(value=percentage))
-    if status_text:
-        root.after(0, lambda: progress_label.config(text=status_text))
-        root.after(0, lambda: log_message(status_text))
-    else:
-        text = f"Encoding: {percentage:.1f}%"
-        root.after(0, lambda: progress_label.config(text=text))
-        if percentage % 10 == 0:  # Log every 10%
-            root.after(0, lambda: log_message(f"Encoding progress: {percentage:.1f}%"))
-
-def download_in_thread(url, output_folder):
-    """Handles the download in a separate thread"""
-    try:
-        # Log start of download
-        root.after(0, lambda: log_message("Starting download process..."))
-        
-        # Optimize system resources
-        optimize_system_resources()
-        
-        # Create the output directory if it doesn't exist
-        os.makedirs(output_folder, exist_ok=True)
-        root.after(0, lambda: log_message(f"Output directory: {output_folder}"))
-        
-        # Get the best streams
-        root.after(0, lambda: log_message("Analyzing video streams..."))
-        video_stream, audio_stream, needs_merge = get_best_streams(url)
-        if not video_stream:
-            root.after(0, lambda: log_message("ERROR: No suitable stream found", "ERROR"))
-            root.after(0, lambda: messagebox.showerror("Error", "No suitable stream found for this video."))
-            return
-
-        resolution = video_stream.resolution
-        root.after(0, lambda: log_message(f"Best quality found: {resolution}"))
-        root.after(0, lambda: progress_label.config(text=f"Starting download in {resolution}..."))
-        
-        if needs_merge:
-            # Use executor to download audio and video in parallel
-            with concurrent.futures.ThreadPoolExecutor(max_workers=DOWNLOAD_THREADS) as executor:
-                # Start video download
-                root.after(0, lambda: progress_label.config(text=f"Downloading video in {resolution}..."))
-                video_future = executor.submit(download_stream, video_stream, output_folder, "video_")
+            logger.info("Process name set using Foundation framework")
+            
+        except ImportError:
+            # Foundation not available, try ctypes approach
+            try:
+                import ctypes
+                import ctypes.util
                 
-                # Start audio download (after updating the UI)
-                time.sleep(0.5)  # Small pause to avoid conflicts in the progress bar
-                root.after(0, lambda: progress_label.config(text="Downloading audio..."))
-                root.after(0, lambda: progress_bar.config(value=0))
-                audio_future = executor.submit(download_stream, audio_stream, output_folder, "audio_")
-                
-                # Wait for both downloads to finish
-                video_path = video_future.result()
-                audio_path = audio_future.result()
-            
-            # Combine files with macOS hardware acceleration
-            acceleration = f"{MACOS_GPU['model']} VideoToolbox" if MACOS_GPU['videotoolbox'] and MACOS_GPU['hevc_encoding'] else "CPU"
-            root.after(0, lambda: progress_label.config(text=f"Combining with {acceleration} HEVC acceleration..."))
-            
-            # Create a more specific filename with HEVC notation
-            final_path = Path(video_path).parent / f"{Path(video_path).stem.replace('video_', '')}_HEVC.mp4"
-            
-            # Perform encoding
-            success, stats = merge_audio_video(video_path, audio_path, str(final_path), update_encode_progress)
-            
-            if success:
-                # Remove temporary files in the background
-                def cleanup_temp_files():
-                    try:
-                        os.remove(video_path)
-                        os.remove(audio_path)
-                    except Exception as e:
-                        logger.error(f"Error removing temporary files: {str(e)}")
-                
-                threading.Thread(target=cleanup_temp_files, daemon=True).start()
-                
-                # Show success message with HEVC info and performance stats
-                codec_info = "HEVC (H.265)"
-                gpu_model = MACOS_GPU['model'] if (MACOS_GPU['videotoolbox'] and MACOS_GPU['hevc_encoding']) else "CPU"
-                fps_info = f"{stats.get('avg_fps', 0):.1f} FPS" if stats.get('avg_fps', 0) > 0 else "Unknown FPS"
-                
-                success_msg = (f"Video successfully downloaded and processed with high quality\n"
-                              f"Resolution: {resolution}\n"
-                              f"Codec: {codec_info}\n"
-                              f"Acceleration: {gpu_model}\n"
-                              f"Encoding Speed: {fps_info}\n"
-                              f"Saved to: {final_path}")
-                root.after(0, lambda: messagebox.showinfo("Success", success_msg))
-            else:
-                root.after(0, lambda: messagebox.showerror("Error", 
-                    "Error combining audio and video."))
-                return
-        else:
-            # Direct download if it's a progressive stream
-            video_path = download_stream(video_stream, output_folder)
-            final_path = video_path
-
-            root.after(0, lambda: messagebox.showinfo("Success", 
-                f"Video successfully downloaded in {resolution}\nSaved to: {final_path}"))
+                # Load Foundation framework
+                foundation_lib = ctypes.util.find_library("Foundation")
+                if foundation_lib:
+                    objc_lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+                    
+                    # Set up function signatures
+                    objc_lib.objc_getClass.restype = ctypes.c_void_p
+                    objc_lib.objc_getClass.argtypes = [ctypes.c_char_p]
+                    objc_lib.sel_registerName.restype = ctypes.c_void_p
+                    objc_lib.sel_registerName.argtypes = [ctypes.c_char_p]
+                    objc_lib.objc_msgSend.restype = ctypes.c_void_p
+                    objc_lib.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+                    
+                    # Get NSProcessInfo and set process name
+                    NSProcessInfo = objc_lib.objc_getClass(b"NSProcessInfo")
+                    processInfo = objc_lib.objc_msgSend(NSProcessInfo, objc_lib.sel_registerName(b"processInfo"))
+                    
+                    # Create NSString for "WampyTube"
+                    objc_lib.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+                    NSString = objc_lib.objc_getClass(b"NSString")
+                    app_name = objc_lib.objc_msgSend(NSString, objc_lib.sel_registerName(b"stringWithUTF8String:"), b"WampyTube")
+                    objc_lib.objc_msgSend(processInfo, objc_lib.sel_registerName(b"setProcessName:"), app_name)
+                    
+                    logger.info("Process name set using ctypes Foundation framework")
+            except Exception as e:
+                logger.warning(f"Failed to set process name with ctypes: {e}")
         
     except Exception as e:
-        logger.error(f"Error in download: {str(e)}")
-        root.after(0, lambda: messagebox.showerror("Error", f"An error occurred: {str(e)}"))
-    finally:
-        root.after(0, cleanup_after_download)
-
-def cleanup_after_download():
-    """Cleans up the interface after a download"""
-    download_button.config(state=tk.NORMAL)
-    progress_frame.pack_forget()
-    progress_bar['value'] = 0
-    progress_label.config(text="")
-
-def download_video():
-    """Starts the download process"""
-    url = url_entry.get().strip()
-    output_folder = output_entry.get().strip()
-    
-    if not url:
-        messagebox.showerror("Error", "Please enter a valid URL.")
-        return
-    if not output_folder:
-        messagebox.showerror("Error", "Please select an output folder.")
-        return
-    
-    # Validate URL (basic check)
-    if not url.startswith(("http://", "https://")) or "youtube.com" not in url and "youtu.be" not in url:
-        messagebox.showerror("Error", "The URL doesn't seem to be a valid YouTube address.")
-        return
-    
-    # Reset and show the progress bar
-    progress_bar['value'] = 0
-    progress_label.config(text="Preparing download...")
-    progress_frame.pack(fill=tk.X, padx=10, pady=5)
-    
-    # Disable the button during download
-    download_button.config(state=tk.DISABLED)
-    
-    # Start the download in a separate thread
-    download_thread = threading.Thread(target=download_in_thread, args=(url, output_folder))
-    download_thread.daemon = True
-    download_thread.start()
-
-def select_output_folder():
-    """Opens a dialog to select the output folder"""
-    folder_selected = filedialog.askdirectory()
-    if folder_selected:
-        output_entry.delete(0, tk.END)
-        output_entry.insert(0, folder_selected)
-
-def center_window(window, width, height):
-    """Centers the window on the screen"""
-    screen_width = window.winfo_screenwidth()
-    screen_height = window.winfo_screenheight()
-    x = (screen_width - width) // 2
-    y = (screen_height - height) // 2
-    window.geometry(f"{width}x{height}+{x}+{y}")
-
-def paste_from_clipboard():
-    """Pastes clipboard content into the URL field"""
-    try:
-        clipboard_text = root.clipboard_get()
-        if clipboard_text:
-            url_entry.delete(0, tk.END)
-            url_entry.insert(0, clipboard_text)
-    except:
-        pass
-
-# macOS Color Scheme
-MACOS_COLORS = {
-    'light': {
-        'bg': '#FFFFFF',
-        'secondary_bg': '#F5F5F7',
-        'card_bg': '#FFFFFF',
-        'text': '#1D1D1F',
-        'secondary_text': '#86868B',
-        'accent': '#007AFF',
-        'success': '#30D158',
-        'warning': '#FF9F0A',
-        'error': '#FF3B30',
-        'border': '#D2D2D7',
-        'input_bg': '#F2F2F7',
-        'shadow': '#00000010'
-    },
-    'dark': {
-        'bg': '#1C1C1E',
-        'secondary_bg': '#2C2C2E',
-        'card_bg': '#2C2C2E',
-        'text': '#FFFFFF',
-        'secondary_text': '#8E8E93',
-        'accent': '#0A84FF',
-        'success': '#32D74B',
-        'warning': '#FF9F0A',
-        'error': '#FF453A',
-        'border': '#38383A',
-        'input_bg': '#1C1C1E',
-        'shadow': '#00000030'
-    }
-}
-
-# Global theme state
-current_theme = 'light'
-
-def detect_system_theme():
-    """Detect if macOS is using dark mode"""
-    try:
-        # Use macOS command to check dark mode
-        result = subprocess.run(['defaults', 'read', '-g', 'AppleInterfaceStyle'], 
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        return 'dark' if result.returncode == 0 else 'light'
-    except:
-        return 'light'
-
-def get_color(key):
-    """Get color from current theme"""
-    return MACOS_COLORS[current_theme][key]
-
-# Custom logging handler for GUI
-class GUILogHandler(logging.Handler):
-    def __init__(self, log_widget):
-        super().__init__()
-        self.log_widget = log_widget
-        
-    def emit(self, record):
-        try:
-            msg = self.format(record)
-            timestamp = time.strftime("%H:%M:%S", time.localtime(record.created))
-            
-            # Color coding based on level
-            if record.levelno >= logging.ERROR:
-                icon = "🔴"
-                color = "#FF453A"
-            elif record.levelno >= logging.WARNING:
-                icon = "🟡"
-                color = "#FF9F0A"
-            elif record.levelno >= logging.INFO:
-                icon = "🔵"
-                color = "#0A84FF"
-            else:
-                icon = "⚪"
-                color = "#8E8E93"
-            
-            formatted_msg = f"[{timestamp}] {icon} {msg}\n"
-            
-            # Update GUI in main thread
-            if hasattr(self.log_widget, 'after'):
-                self.log_widget.after(0, self._update_log, formatted_msg, color)
-        except Exception:
-            pass
-    
-    def _update_log(self, message, color="#8E8E93"):
-        try:
-            self.log_widget.config(state=tk.NORMAL)
-            self.log_widget.insert(tk.END, message)
-            self.log_widget.see(tk.END)
-            self.log_widget.config(state=tk.DISABLED)
-        except Exception:
-            pass
-
-def log_message(message, level="INFO"):
-    """Add message to log with timestamp and color coding"""
-    timestamp = time.strftime("%H:%M:%S")
-    
-    # Color coding based on level
-    if level == "ERROR":
-        icon = "🔴"
-    elif level == "WARNING":
-        icon = "🟡"
-    elif level == "SUCCESS":
-        icon = "🟢"
-    elif level == "INFO":
-        icon = "🔵"
-    else:
-        icon = "⚪"
-    
-    formatted_message = f"[{timestamp}] {icon} {message}\n"
-    
-    try:
-        if 'log_text' in globals() and log_text:
-            log_text.config(state=tk.NORMAL)
-            log_text.insert(tk.END, formatted_message)
-            log_text.see(tk.END)
-            log_text.config(state=tk.DISABLED)
-    except:
-        pass
-
-def toggle_theme():
-    """Toggle between light and dark theme"""
-    global current_theme
-    current_theme = 'dark' if current_theme == 'light' else 'light'
-    apply_theme()
-
-def apply_theme():
-    """Apply current theme to all widgets"""
-    try:
-        # Main window
-        root.config(bg=get_color('bg'))
-        
-        # Main container
-        main_container.config(bg=get_color('bg'))
-        
-        # Input section
-        input_section.config(bg=get_color('card_bg'), highlightbackground=get_color('border'))
-        url_label.config(bg=get_color('card_bg'), fg=get_color('text'))
-        folder_label.config(bg=get_color('card_bg'), fg=get_color('text'))
-        url_frame.config(bg=get_color('card_bg'))
-        folder_frame.config(bg=get_color('card_bg'))
-        url_entry.config(bg=get_color('input_bg'), fg=get_color('text'), 
-                        insertbackground=get_color('text'), highlightbackground=get_color('accent'))
-        output_entry.config(bg=get_color('input_bg'), fg=get_color('text'), 
-                           insertbackground=get_color('text'), highlightbackground=get_color('accent'))
-        
-        # Progress section
-        progress_section.config(bg=get_color('card_bg'), highlightbackground=get_color('border'))
-        progress_title.config(bg=get_color('card_bg'), fg=get_color('text'))
-        progress_label.config(bg=get_color('card_bg'), fg=get_color('secondary_text'))
-        
-        # Log section
-        log_section.config(bg=get_color('card_bg'), highlightbackground=get_color('border'))
-        log_title.config(bg=get_color('card_bg'), fg=get_color('text'))
-        log_frame.config(bg=get_color('card_bg'))
-        log_text.config(bg=get_color('input_bg'), fg=get_color('text'), 
-                       insertbackground=get_color('text'))
-        
-        # Update button styles
-        style.configure("Accent.TButton", 
-                       background=get_color('accent'),
-                       foreground='white',
-                       borderwidth=0,
-                       focuscolor='none',
-                       relief='flat')
-        
-        style.map("Accent.TButton",
-                  background=[('active', get_color('accent')),
-                             ('pressed', get_color('accent'))],
-                  foreground=[('active', 'white'),
-                             ('pressed', 'white')])
-        
-        style.configure("Secondary.TButton",
-                       background=get_color('secondary_bg'),
-                       foreground=get_color('text'),
-                       borderwidth=1,
-                       focuscolor='none',
-                       relief='flat')
-        
-        style.map("Secondary.TButton",
-                  background=[('active', get_color('border')),
-                             ('pressed', get_color('secondary_bg'))],
-                  foreground=[('active', get_color('text')),
-                             ('pressed', get_color('text'))])
-        
-        style.configure("TProgressbar",
-                       background=get_color('accent'),
-                       troughcolor=get_color('secondary_bg'),
-                       borderwidth=0,
-                       lightcolor=get_color('accent'),
-                       darkcolor=get_color('accent'))
-    except:
-        pass
-
-def create_gui():
-    """Creates the modern macOS-style GUI"""
-    global root, url_entry, output_entry, download_button, progress_bar, progress_label
-    global main_container, input_section, url_label, folder_label, progress_section, progress_title
-    global log_section, log_title, log_text, log_frame, style
-    global url_frame, folder_frame, progress_frame, current_theme
-    
-    # Detect system theme
-    current_theme = detect_system_theme()
-    
-    # Create main window
-    root = tk.Tk()
-    root.title("WampyTube - YouTube Downloader")
-    root.geometry("800x700")
-    center_window(root, 800, 700)
-    root.resizable(True, True)
-    root.minsize(700, 600)
-    
-    # Set window icon if available
-    try:
-        icon_path = os.path.join(SCRIPT_DIR, 'icon.png')
-        if os.path.exists(icon_path):
-            # For macOS, we need to use iconphoto
-            icon = tk.PhotoImage(file=icon_path)
-            root.iconphoto(True, icon)
-    except Exception as e:
-        logger.debug(f"Could not set icon: {e}")
-    
-    # Configure ttk styles
-    style = ttk.Style()
-    style.theme_use('clam')
-    
-    # Configure initial styles before creating widgets
-    style.configure("Accent.TButton", 
-                   background=get_color('accent'),
-                   foreground='white',
-                   borderwidth=0,
-                   focuscolor='none',
-                   relief='flat')
-    
-    style.map("Accent.TButton",
-              background=[('active', get_color('accent')),
-                         ('pressed', get_color('accent'))],
-              foreground=[('active', 'white'),
-                         ('pressed', 'white')])
-    
-    style.configure("Secondary.TButton",
-                   background=get_color('secondary_bg'),
-                   foreground=get_color('text'),
-                   borderwidth=1,
-                   focuscolor='none',
-                   relief='flat')
-    
-    style.map("Secondary.TButton",
-              background=[('active', get_color('border')),
-                         ('pressed', get_color('secondary_bg'))],
-              foreground=[('active', get_color('text')),
-                         ('pressed', get_color('text'))])
-    
-    style.configure("TProgressbar",
-                   background=get_color('accent'),
-                   troughcolor=get_color('secondary_bg'),
-                   borderwidth=0,
-                   lightcolor=get_color('accent'),
-                   darkcolor=get_color('accent'))
-    
-    # Main container with padding
-    main_container = tk.Frame(root, bg=get_color('bg'))
-    main_container.pack(fill=tk.BOTH, expand=True, padx=30, pady=30)
-    
-    # Input section
-    input_section = tk.Frame(
-        main_container,
-        bg=get_color('card_bg'),
-        relief=tk.SOLID,
-        bd=1,
-        highlightbackground=get_color('border'),
-        highlightthickness=1
-    )
-    input_section.pack(fill=tk.X, pady=(0, 20))
-    
-    # URL input
-    url_label = tk.Label(
-        input_section,
-        text="YouTube URL",
-        font=("SF Pro Text", 14, "bold"),
-        bg=get_color('card_bg'),
-        fg=get_color('text')
-    )
-    url_label.pack(anchor=tk.W, padx=20, pady=(20, 5))
-    
-    url_frame = tk.Frame(input_section, bg=get_color('card_bg'))
-    url_frame.pack(fill=tk.X, padx=20, pady=(0, 15))
-    
-    url_entry = tk.Entry(
-        url_frame,
-        font=("SF Pro Text", 13),
-        bg=get_color('input_bg'),
-        fg=get_color('text'),
-        insertbackground=get_color('text'),
-        relief=tk.FLAT,
-        bd=8
-    )
-    url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-    
-    paste_button = ttk.Button(
-        url_frame,
-        text="Paste",
-        command=paste_from_clipboard,
-        style="Secondary.TButton",
-        width=8
-    )
-    paste_button.pack(side=tk.RIGHT, padx=(10, 0))
-    
-    # Output folder
-    folder_label = tk.Label(
-        input_section,
-        text="Output Folder",
-        font=("SF Pro Text", 14, "bold"),
-        bg=get_color('card_bg'),
-        fg=get_color('text')
-    )
-    folder_label.pack(anchor=tk.W, padx=20, pady=(0, 5))
-    
-    folder_frame = tk.Frame(input_section, bg=get_color('card_bg'))
-    folder_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
-    
-    output_entry = tk.Entry(
-        folder_frame,
-        font=("SF Pro Text", 13),
-        bg=get_color('input_bg'),
-        fg=get_color('text'),
-        insertbackground=get_color('text'),
-        relief=tk.FLAT,
-        bd=8
-    )
-    output_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-    
-    browse_button = ttk.Button(
-        folder_frame,
-        text="Browse",
-        command=select_output_folder,
-        style="Secondary.TButton",
-        width=8
-    )
-    browse_button.pack(side=tk.RIGHT, padx=(10, 0))
-    
-    # Download button
-    download_button = ttk.Button(
-        input_section,
-        text="Download Video",
-        command=download_video,
-        style="Accent.TButton"
-    )
-    download_button.pack(pady=(0, 20))
-    
-    # Progress section
-    progress_section = tk.Frame(
-        main_container,
-        bg=get_color('card_bg'),
-        relief=tk.SOLID,
-        bd=1,
-        highlightbackground=get_color('border'),
-        highlightthickness=1
-    )
-    progress_section.pack(fill=tk.X, pady=(0, 20))
-    
-    progress_title = tk.Label(
-        progress_section,
-        text="Progress",
-        font=("SF Pro Text", 14, "bold"),
-        bg=get_color('card_bg'),
-        fg=get_color('text')
-    )
-    progress_title.pack(anchor=tk.W, padx=20, pady=(15, 5))
-    
-    progress_frame = tk.Frame(progress_section, bg=get_color('card_bg'))
-    progress_frame.pack(fill=tk.X, padx=20, pady=(0, 15))
-    
-    progress_bar = ttk.Progressbar(
-        progress_frame,
-        mode='determinate'
-    )
-    progress_bar.pack(fill=tk.X, pady=(0, 8))
-    
-    progress_label = tk.Label(
-        progress_frame,
-        text="Ready to download",
-        font=("SF Pro Text", 12),
-        bg=get_color('card_bg'),
-        fg=get_color('secondary_text')
-    )
-    progress_label.pack(anchor=tk.W)
-    
-    # Log section
-    log_section = tk.Frame(
-        main_container,
-        bg=get_color('card_bg'),
-        relief=tk.SOLID,
-        bd=1,
-        highlightbackground=get_color('border'),
-        highlightthickness=1
-    )
-    log_section.pack(fill=tk.BOTH, expand=True)
-    
-    log_title = tk.Label(
-        log_section,
-        text="Activity Log",
-        font=("SF Pro Text", 14, "bold"),
-        bg=get_color('card_bg'),
-        fg=get_color('text')
-    )
-    log_title.pack(anchor=tk.W, padx=20, pady=(15, 5))
-    
-    log_frame = tk.Frame(log_section, bg=get_color('card_bg'))
-    log_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
-    
-    # Log text with scrollbar
-    log_text = tk.Text(
-        log_frame,
-        font=("SF Mono", 11),
-        bg=get_color('input_bg'),
-        fg=get_color('text'),
-        insertbackground=get_color('text'),
-        relief=tk.FLAT,
-        bd=8,
-        state=tk.DISABLED,
-        wrap=tk.WORD
-    )
-    
-    scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=log_text.yview)
-    log_text.configure(yscrollcommand=scrollbar.set)
-    
-    log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-    
-    # Apply initial theme
-    apply_theme()
-    
-    # Set up logging without duplication
-    # Clear any existing handlers
-    for handler in logger.handlers[:]:
-        logger.removeHandler(handler)
-    
-    # Add only the GUI handler
-    gui_handler = GUILogHandler(log_text)
-    gui_handler.setFormatter(logging.Formatter('%(message)s'))
-    gui_handler.setLevel(logging.INFO)
-    logger.addHandler(gui_handler)
-    logger.setLevel(logging.INFO)
-    
-    # Initial log message - only log once
-    cpu_info = f"{SYSTEM_CORES} cores, {SYSTEM_THREADS} threads"
-    gpu_info = MACOS_GPU['model'] if MACOS_GPU['available'] else "No GPU detected"
-    ffmpeg_info = f"FFmpeg {FFMPEG_INFO.get('version', 'Unknown')}" if FFMPEG_INFO.get('available') else "FFmpeg not found"
-    
-    log_message("WampyTube initialized successfully")
-    log_message(f"System: {gpu_info} • {cpu_info}")
-    log_message(f"FFmpeg: {ffmpeg_info}")
-    
-    # Bind Enter key to download button
-    root.bind('<Return>', lambda event: download_video())
-    
-    # Set default output folder to Downloads
-    downloads_folder = os.path.expanduser("~/Downloads")
-    output_entry.insert(0, downloads_folder)
-    
-    return root
+        logger.error(f"Failed to set process name: {e}")
 
 if __name__ == "__main__":
-    # Initialize the GUI
-    root = create_gui()
-    # Start the main loop
-    root.mainloop()
+    # Set process name before creating the app
+    set_process_name()
+    
+    # Create and run the app
+    app = WampyTubeApp()
+    app.mainloop()
