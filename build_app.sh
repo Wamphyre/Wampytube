@@ -304,9 +304,9 @@ cat > dist/WampyTube.app/Contents/Info.plist << 'EOF'
     <key>CFBundleDisplayName</key>
     <string>WampyTube</string>
     <key>CFBundleVersion</key>
-    <string>1.1.0</string>
+    <string>1.1.1</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.1.0</string>
+    <string>1.1.1</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleSignature</key>

@@ -136,8 +136,11 @@ class WampyTubeApp(ctk.CTk):
         
         # Configure window
         self.title("WampyTube")
-        self.geometry("800x700")
-        self.minsize(700, 600)
+        self.geometry("800x800")  # Increased default height
+        self.minsize(700, 700)    # Increased minimum height
+        
+        # Track if video info is shown to adjust window size
+        self.video_info_shown = False
         
         # Set icon if available
         self.set_app_icon()
@@ -248,7 +251,7 @@ class WampyTubeApp(ctk.CTk):
                                     font=ctk.CTkFont(size=22, weight="bold"))
             name_label.pack(pady=(0, 3))
             
-            version_label = ctk.CTkLabel(main_frame, text="Version 1.1.0", 
+            version_label = ctk.CTkLabel(main_frame, text="Version 1.1.1", 
                                        font=ctk.CTkFont(size=13))
             version_label.pack(pady=(0, 12))
             
@@ -342,9 +345,44 @@ FFmpeg: {ffmpeg_version}"""
         try:
             self.url_entry.delete(0, "end")
             # Hide video info frame if visible
-            self.video_info_frame.pack_forget()
+            if self.video_info_shown:
+                self.video_info_frame.pack_forget()
+                self.video_info_shown = False
+                self.after(100, self.adjust_window_size)  # Readjust window size
+            # Clear selectors
+            self.quality_selector.configure(values=[])
+            self.audio_selector.configure(values=[])
+            # Clear stored data
+            self.available_streams = {}
+            self.available_audio = {}
+            self.current_video = None
         except Exception as e:
             logger.error(f"Failed to clear URL: {e}")
+    
+    def adjust_window_size(self):
+        """Adjust window size based on content"""
+        try:
+            # Update the window to calculate new required size
+            self.update_idletasks()
+            
+            # Get current window size
+            current_width = self.winfo_width()
+            current_height = self.winfo_height()
+            
+            # Calculate required height based on content
+            if self.video_info_shown:
+                # When video info is shown, we need more height
+                target_height = max(850, current_height)
+            else:
+                # When video info is hidden, we can use original height
+                target_height = 800
+            
+            # Only adjust if there's a significant difference
+            if abs(current_height - target_height) > 30:
+                self.geometry(f"{current_width}x{target_height}")
+                
+        except Exception as e:
+            logger.error(f"Failed to adjust window size: {e}")
     
     def set_app_name(self):
         """Set application name for macOS menu bar"""
@@ -482,11 +520,41 @@ FFmpeg: {ffmpeg_version}"""
         info_details_frame = ctk.CTkFrame(self.video_info_frame, fg_color="transparent")
         info_details_frame.pack(fill="x", padx=15, pady=(0, 15))
         
-        self.video_res_label = ctk.CTkLabel(info_details_frame, text="", font=ctk.CTkFont(size=13))
-        self.video_res_label.pack(side="left", padx=(0, 20))
-        
         self.video_duration_label = ctk.CTkLabel(info_details_frame, text="", font=ctk.CTkFont(size=13))
-        self.video_duration_label.pack(side="left")
+        self.video_duration_label.pack(side="left", padx=(0, 20))
+        
+        # Selection Options Section
+        options_frame = ctk.CTkFrame(self.video_info_frame)
+        options_frame.pack(fill="x", padx=15, pady=(0, 15))
+        
+        # Main container for both selectors
+        selectors_main_container = ctk.CTkFrame(options_frame, fg_color="transparent")
+        selectors_main_container.pack(fill="x", padx=15, pady=15)
+        
+        # Video Quality Section (Left)
+        quality_section = ctk.CTkFrame(selectors_main_container, fg_color="transparent")
+        quality_section.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        
+        quality_label = ctk.CTkLabel(quality_section, text="Video Quality:", font=ctk.CTkFont(size=13, weight="bold"))
+        quality_label.pack(anchor="w", pady=(0, 5))
+        
+        self.quality_selector = ctk.CTkComboBox(quality_section, width=200, state="readonly")
+        self.quality_selector.pack(fill="x")
+        
+        # Audio Language Section (Right)
+        audio_section = ctk.CTkFrame(selectors_main_container, fg_color="transparent")
+        audio_section.pack(side="left", fill="x", expand=True, padx=(10, 0))
+        
+        audio_label = ctk.CTkLabel(audio_section, text="Audio Language:", font=ctk.CTkFont(size=13, weight="bold"))
+        audio_label.pack(anchor="w", pady=(0, 5))
+        
+        self.audio_selector = ctk.CTkComboBox(audio_section, width=200, state="readonly")
+        self.audio_selector.pack(fill="x")
+        
+        # Store available streams for later use
+        self.available_streams = {}
+        self.available_audio = {}
+        self.current_video = None
         
         # Output Folder Section
         folder_frame = ctk.CTkFrame(main_container)
@@ -595,23 +663,201 @@ FFmpeg: {ffmpeg_version}"""
             return
         
         try:
+            self.log_message("Analyzing video streams...")
             yt = YouTube(url, use_oauth=False, allow_oauth_cache=True)
             yt.check_availability()
             
-            # Get best stream info
-            video_stream = yt.streams.get_highest_resolution()
+            # Store current video for later use
+            self.current_video = yt
             
             # Update video info display
-            self.video_title_label.configure(text=yt.title[:60] + "..." if len(yt.title) > 60 else yt.title)
-            self.video_res_label.configure(text=f"🎬 {video_stream.resolution}")
+            title_text = yt.title[:60] + "..." if len(yt.title) > 60 else yt.title
+            self.video_title_label.configure(text=title_text)
             self.video_duration_label.configure(text=f"⏱️ {self.format_duration(yt.length)}")
+            
+            # Get all available streams
+            self.populate_quality_options(yt)
+            self.populate_audio_options(yt)
             
             # Show video info frame
             self.video_info_frame.pack(fill="x", pady=(0, 15), after=self.children['!ctkframe'].children['!ctkframe'])
             
+            # Adjust window size if needed
+            if not self.video_info_shown:
+                self.video_info_shown = True
+                self.after(100, self.adjust_window_size)  # Small delay to let the UI update
+            
             self.log_message(f"Analyzed: {yt.title}", "success")
         except Exception as e:
             self.log_message(f"Failed to analyze URL: {str(e)}", "error")
+    
+    def populate_quality_options(self, yt):
+        """Populate quality selector with available resolutions"""
+        try:
+            # Get all video streams (both progressive and adaptive)
+            progressive_streams = yt.streams.filter(progressive=True, file_extension="mp4").order_by("resolution").desc()
+            adaptive_streams = yt.streams.filter(adaptive=True, only_video=True, file_extension="mp4").order_by("resolution").desc()
+            
+            # Collect unique resolutions
+            resolutions = set()
+            stream_map = {}
+            
+            # Add progressive streams
+            for stream in progressive_streams:
+                if stream.resolution:
+                    res_key = f"{stream.resolution} (Progressive)"
+                    resolutions.add(res_key)
+                    stream_map[res_key] = {'type': 'progressive', 'stream': stream}
+            
+            # Add adaptive streams (higher quality)
+            for stream in adaptive_streams:
+                if stream.resolution:
+                    res_key = f"{stream.resolution} (Best Quality)"
+                    resolutions.add(res_key)
+                    stream_map[res_key] = {'type': 'adaptive', 'stream': stream}
+            
+            # Sort resolutions by quality (descending)
+            sorted_resolutions = sorted(list(resolutions), key=lambda x: int(x.split('p')[0]), reverse=True)
+            
+            # Update selector
+            self.quality_selector.configure(values=sorted_resolutions)
+            if sorted_resolutions:
+                self.quality_selector.set(sorted_resolutions[0])  # Select highest quality by default
+            
+            # Store stream mapping
+            self.available_streams = stream_map
+            
+            self.log_message(f"Found {len(sorted_resolutions)} quality options")
+            
+        except Exception as e:
+            self.log_message(f"Error getting quality options: {str(e)}", "error")
+            self.quality_selector.configure(values=["Best Available"])
+            self.quality_selector.set("Best Available")
+    
+    def populate_audio_options(self, yt):
+        """Populate audio selector with available languages"""
+        try:
+            # Language code to name mapping
+            language_names = {
+                'en': 'English',
+                'es': 'Spanish', 
+                'es-ES': 'Spanish',
+                'es-419': 'Spanish (Latin America)',
+                'fr': 'French',
+                'de': 'German',
+                'it': 'Italian',
+                'pt': 'Portuguese',
+                'pt-BR': 'Portuguese (Brazil)',
+                'ru': 'Russian',
+                'ja': 'Japanese',
+                'ko': 'Korean',
+                'zh': 'Chinese',
+                'zh-CN': 'Chinese (Simplified)',
+                'zh-TW': 'Chinese (Traditional)',
+                'ar': 'Arabic',
+                'hi': 'Hindi',
+                'tr': 'Turkish',
+                'pl': 'Polish',
+                'nl': 'Dutch',
+                'sv': 'Swedish',
+                'da': 'Danish',
+                'no': 'Norwegian',
+                'fi': 'Finnish'
+            }
+            
+            audio_options = []
+            audio_map = {}
+            
+            # Try to get language info from video metadata first
+            try:
+                # Access the video's raw data to get language information
+                if hasattr(yt, 'vid_info') and yt.vid_info:
+                    # Look for adaptive formats which might have language info
+                    adaptive_formats = yt.vid_info.get('streamingData', {}).get('adaptiveFormats', [])
+                    
+                    for fmt in adaptive_formats:
+                        if fmt.get('mimeType', '').startswith('audio/'):
+                            lang_code = fmt.get('languageCode', '').lower()
+                            quality = fmt.get('averageBitrate', 0)
+                            quality_str = f"{quality//1000}kbps" if quality > 0 else "Unknown"
+                            
+                            if lang_code and lang_code in language_names:
+                                lang_name = language_names[lang_code]
+                                label = f"{lang_name} ({quality_str})"
+                                
+                                # Create a corresponding stream object
+                                audio_streams = yt.streams.filter(only_audio=True, file_extension="mp4")
+                                if audio_streams:
+                                    # Match by quality or use best available
+                                    matching_stream = None
+                                    for stream in audio_streams:
+                                        if stream.abr and quality_str in stream.abr:
+                                            matching_stream = stream
+                                            break
+                                    
+                                    if not matching_stream:
+                                        matching_stream = audio_streams.order_by("abr").desc().first()
+                                    
+                                    if matching_stream and label not in [opt for opt in audio_options]:
+                                        audio_options.append(label)
+                                        audio_map[label] = matching_stream
+            except Exception as e:
+                self.log_message(f"Could not extract language info from metadata: {str(e)}", "warning")
+            
+            # If no languages found from metadata, fall back to stream analysis
+            if not audio_options:
+                audio_streams = yt.streams.filter(only_audio=True, file_extension="mp4").order_by("abr").desc()
+                
+                # Try to detect language from video title or description
+                detected_lang = self.detect_video_language(yt)
+                
+                for i, stream in enumerate(audio_streams[:3]):  # Limit to top 3
+                    quality = stream.abr or 'Unknown'
+                    
+                    if i == 0 and detected_lang:
+                        # Use detected language for the first (best quality) stream
+                        lang_name = language_names.get(detected_lang, detected_lang.upper())
+                        label = f"{lang_name} ({quality})"
+                    elif i == 0:
+                        label = f"Default ({quality})"
+                    else:
+                        label = f"Alternative {i} ({quality})"
+                    
+                    audio_options.append(label)
+                    audio_map[label] = stream
+            
+            # Update selector
+            self.audio_selector.configure(values=audio_options)
+            if audio_options:
+                self.audio_selector.set(audio_options[0])  # Select best quality by default
+            
+            # Store audio mapping
+            self.available_audio = audio_map
+            
+            self.log_message(f"Found {len(audio_options)} audio tracks")
+            
+        except Exception as e:
+            self.log_message(f"Error getting audio options: {str(e)}", "error")
+            self.audio_selector.configure(values=["Default Audio"])
+            self.audio_selector.set("Default Audio")
+    
+    def detect_video_language(self, yt):
+        """Try to detect video language from title, description, or channel"""
+        try:
+            # Simple language detection based on common patterns
+            title = yt.title.lower() if yt.title else ""
+            description = yt.description.lower() if yt.description else ""
+            
+            # Spanish indicators
+            spanish_words = ['español', 'spanish', 'latino', 'castellano', 'méxico', 'argentina', 'colombia']
+            if any(word in title or word in description for word in spanish_words):
+                return 'es'
+            
+            # English is default for most content
+            return 'en'
+            
+        except Exception:
+            return 'en'  # Default to English
     
     def format_duration(self, seconds):
         """Format duration in seconds to readable string"""
@@ -669,9 +915,9 @@ FFmpeg: {ffmpeg_version}"""
             yt = YouTube(url, on_progress_callback=self.on_download_progress, use_oauth=False, allow_oauth_cache=True)
             yt.check_availability()
             
-            # Get best streams
-            self.log_message("Analyzing video streams...")
-            video_stream, audio_stream, needs_merge = self.get_best_streams(yt)
+            # Get selected streams
+            self.log_message("Preparing selected streams...")
+            video_stream, audio_stream, needs_merge = self.get_selected_streams(yt)
             
             if not video_stream:
                 raise Exception("No suitable stream found")
@@ -712,8 +958,42 @@ FFmpeg: {ffmpeg_version}"""
             self.log_message(f"Download failed: {str(e)}", "error")
             self.after(0, lambda: self.download_failed())
     
-    def get_best_streams(self, yt):
-        """Get the best available streams"""
+    def get_selected_streams(self, yt):
+        """Get streams based on user selection"""
+        try:
+            selected_quality = self.quality_selector.get()
+            selected_audio = self.audio_selector.get()
+            
+            # Get video stream based on selection
+            if selected_quality in self.available_streams:
+                stream_info = self.available_streams[selected_quality]
+                video_stream = stream_info['stream']
+                needs_merge = stream_info['type'] == 'adaptive'
+            else:
+                # Fallback to best available
+                video_stream = yt.streams.get_highest_resolution()
+                needs_merge = False
+            
+            # Get audio stream based on selection
+            audio_stream = None
+            if needs_merge or selected_quality == "Best Available":
+                if hasattr(self, 'available_audio') and selected_audio in self.available_audio:
+                    audio_stream = self.available_audio[selected_audio]
+                else:
+                    # Fallback to best audio
+                    audio_stream = yt.streams.filter(only_audio=True, file_extension="mp4")\
+                                        .order_by("abr").desc().first()
+                needs_merge = True
+            
+            return video_stream, audio_stream, needs_merge
+            
+        except Exception as e:
+            self.log_message(f"Error getting selected streams, using defaults: {str(e)}", "warning")
+            # Fallback to original logic
+            return self.get_best_streams_fallback(yt)
+    
+    def get_best_streams_fallback(self, yt):
+        """Fallback method for getting streams"""
         streams = yt.streams.filter(progressive=True, file_extension="mp4").order_by("resolution").desc()
         
         if not streams:

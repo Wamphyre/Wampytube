@@ -205,6 +205,13 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Changelog
 
+### v1.1.1
+- **Quality Selection**: Added dropdown selector for available video resolutions
+- **Audio Language Selection**: Added selector for different audio tracks and languages
+- **Enhanced Video Analysis**: Better detection of available streams and audio languages
+- **Improved Layout**: Compact side-by-side design for quality and audio selectors
+- **Better Window Sizing**: Automatic window adjustment when video info is displayed
+
 ### v1.1.0
 - **Complete GUI Rebuild**: Entire interface reconstructed using CustomTkinter for modern aesthetics
 - **Native App Identity**: Complete removal of "Python" branding from menu bar and dock
