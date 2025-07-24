@@ -2,3 +2,4 @@ pytubefix
 requests
 psutil
 customtkinter
+pyinstaller
