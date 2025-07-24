@@ -1,11 +1,12 @@
 # WampyTube - YouTube Video Downloader
 
-A modern, macOS-optimized YouTube video downloader with hardware acceleration support and a beautiful native interface.
+A modern, macOS-optimized YouTube video downloader with hardware acceleration support and a beautiful native interface. **Now 100% self-contained with no external dependencies required!**
 
 ![WampyTube Icon](icon.png)
 
 ## Features
 
+- **🎯 100% Self-Contained**: No Python or external dependencies required - everything is bundled!
 - **High-Quality Downloads**: Automatically downloads videos in the highest available quality (up to 4K)
 - **Hardware Acceleration**: Uses macOS VideoToolbox for blazing-fast HEVC (H.265) encoding
 - **GPU Support**: Automatically detects and utilizes AMD, Intel, or Apple Silicon GPUs
@@ -20,17 +21,22 @@ A modern, macOS-optimized YouTube video downloader with hardware acceleration su
 
 ## Requirements
 
-- macOS 10.14 or later
-- Python 3.8 or higher
-- FFmpeg (included in the repository)
+- **For Users**: macOS 10.14 or later (that's it!)
+- **For Developers**: Python 3.8+ and build tools (see Building section)
 
 ## Installation
 
-### Option 1: Download Pre-built App
+### 🚀 For Users (Recommended)
 
-Download the latest release from the [Releases](https://github.com/Wamphyre/Wampytube/releases) page and drag WampyTube.app to your Applications folder.
+**Simply download and run - no setup required!**
 
-### Option 2: Build from Source
+1. Download the latest release from the [Releases](https://github.com/Wamphyre/Wampytube/releases) page
+2. Drag `WampyTube.app` to your Applications folder
+3. Double-click to run (first time: right-click → Open if blocked by Gatekeeper)
+
+**That's it!** The app is completely self-contained with Python and all dependencies bundled inside.
+
+### 🛠️ For Developers (Build from Source)
 
 1. Clone the repository:
 ```bash
@@ -38,31 +44,28 @@ git clone https://github.com/Wamphyre/Wampytube.git
 cd Wampytube
 ```
 
-2. Install Python dependencies:
-```bash
-pip3 install -r requirements.txt
-```
-
-3. Build the macOS app:
+2. Build the self-contained app:
 ```bash
 chmod +x build_app.sh
 ./build_app.sh
 ```
 
 The script will:
-- Check all dependencies
-- Create a native launcher
-- Generate a proper macOS app bundle
+- Install PyInstaller and all dependencies automatically
+- Create a 100% self-contained app bundle with embedded Python
+- Generate a proper macOS app with native integration
 - Optionally create a DMG for distribution
 
-4. Find your app in the `dist/` folder:
+3. Find your app in the `dist/` folder:
 ```bash
 open dist/WampyTube.app
 ```
 
-### Option 3: Run Directly (Development)
+### 🔧 Development Mode (Optional)
 
+For development only:
 ```bash
+pip3 install -r requirements.txt
 python3 wampytube.py
 ```
 
@@ -102,40 +105,52 @@ WampyTube automatically detects your system's GPU and uses:
 - AMD Radeon GPUs
 - Intel integrated graphics
 
-## Building the App
+## Building the Self-Contained App
 
-The `build_app.sh` script creates a macOS application bundle:
+The `build_app.sh` script uses **PyInstaller** to create a completely self-contained macOS application:
 
-1. **Native Launcher**: Custom shell script launcher that replaces Python branding
-2. **Smart Python Detection**: Finds Python in multiple locations
-3. **Automatic Icon Generation**: Converts PNG to macOS ICNS format
-4. **Menu Bar Integration**: Ensures "WampyTube" appears instead of "Python"
-5. **Code Signing**: Signs the app for Gatekeeper (if certificates available)
-6. **DMG Creation**: Optional disk image for easy distribution
+### Key Features of the Build Process
 
-### Build Requirements
+1. **🐍 Embedded Python**: Includes Python interpreter inside the app bundle
+2. **📦 All Dependencies Bundled**: PyTubeFix, CustomTkinter, and all libraries included
+3. **⚡ FFmpeg Included**: Video processing binary embedded in the app
+4. **🎨 Native Integration**: Proper macOS app bundle with icon and Info.plist
+5. **🔐 Code Signing**: Automatic signing for Gatekeeper compatibility
+6. **💿 DMG Creation**: Optional disk image for easy distribution
 
-- Xcode Command Line Tools (`xcode-select --install`)
-- Python 3 with tkinter support
-- Required Python packages (installed automatically)
+### Build Requirements (Developers Only)
+
+- Python 3.8 or higher
+- pip3 (Python package manager)
+- macOS development tools
 
 ### Build Process
 
 ```bash
-# Make script executable
-chmod +x build_app.sh
+# Clone and enter directory
+git clone https://github.com/Wamphyre/Wampytube.git
+cd Wampytube
 
-# Run build
+# Make script executable and run
+chmod +x build_app.sh
 ./build_app.sh
 
-# The script will:
-# 1. Check all dependencies
-# 2. Create native shell launcher (eliminates Python branding)
-# 3. Generate app bundle with proper icon integration
-# 4. Configure Info.plist for native app behavior
-# 5. Optionally create DMG for distribution
-# 6. Test the app
+# The script automatically:
+# 1. Installs PyInstaller and all dependencies
+# 2. Creates optimized PyInstaller spec file
+# 3. Builds self-contained app with embedded Python
+# 4. Includes FFmpeg and all resources
+# 5. Signs the app bundle
+# 6. Optionally creates DMG for distribution
 ```
+
+### What Makes It Self-Contained
+
+- **No Python Required**: Python interpreter is embedded in the app
+- **No pip install**: All Python packages are bundled
+- **No FFmpeg Install**: Video processing binary is included
+- **No External Dependencies**: Everything needed is inside the .app bundle
+- **Portable**: Can run on any macOS 10.14+ system without setup
 
 ## File Structure
 
@@ -154,7 +169,12 @@ wampytube/
 
 ## Dependencies
 
-- **customtkinter**: Modern and customizable GUI framework (NEW in v1.1.0)
+### For Users
+**None!** The app is completely self-contained.
+
+### For Developers (Build Dependencies)
+- **pyinstaller**: Creates self-contained executable with embedded Python
+- **customtkinter**: Modern and customizable GUI framework
 - **pytubefix**: YouTube video downloader library
 - **psutil**: System resource monitoring
 - **requests**: HTTP library
@@ -162,19 +182,15 @@ wampytube/
 
 ## Troubleshooting
 
-### FFmpeg not found
-- The build script includes ffmpeg in the app bundle
-- For development, ensure `ffmpeg` is in the same directory as `wampytube.py`
-- Make it executable: `chmod +x ffmpeg`
-
 ### App won't open (Gatekeeper)
-- Right-click the app and select "Open"
+- **First time**: Right-click the app and select "Open"
 - Or remove quarantine: `xattr -cr /Applications/WampyTube.app`
+- The app is self-contained, so no other setup is needed
 
-### Python dependencies missing
-- The app will attempt to install them automatically
-- Or install manually: `pip3 install pytubefix requests psutil customtkinter`
-- **Note**: CustomTkinter is required for the modern GUI (new in v1.1.0)
+### "Python dependencies missing" (Development only)
+- **For users**: This shouldn't happen with the self-contained app
+- **For developers**: Run `pip3 install -r requirements.txt`
+- **Building**: The build script installs everything automatically
 
 ### Download fails
 - Check your internet connection
@@ -201,9 +217,17 @@ View detailed logs in the Activity Log section of the app.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the BSD 3-Clause License - see the [LICENSE](LICENSE) file for details.
 
 ## Changelog
+
+### v1.2.0 (Current)
+- **🎯 100% Self-Contained App**: Complete migration to PyInstaller for embedded Python
+- **📦 No Dependencies Required**: Users no longer need Python or pip installations
+- **⚡ Optimized Build Process**: Automated PyInstaller workflow with UPX compression
+- **🔐 Enhanced Security**: Proper code signing and Gatekeeper compatibility
+- **📱 Improved Portability**: Single .app file runs on any macOS 10.14+ system
+- **🛠️ Developer Experience**: Simplified build process with automatic dependency management
 
 ### v1.1.1
 - **Quality Selection**: Added dropdown selector for available video resolutions
